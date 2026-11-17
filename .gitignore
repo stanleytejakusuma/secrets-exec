@@ -1,0 +1,14 @@
+# Local configuration, audit output and editor/runtime artifacts
+consumers.conf
+backend.conf
+audit.log
+*.log
+.env
+.env.*
+*.pem
+*.key
+__pycache__/
+*.pyc
+.DS_Store
+*~
+*.swp

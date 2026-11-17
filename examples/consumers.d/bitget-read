@@ -1,0 +1,428 @@
+#!/bin/bash
+# bitget-read — example read-only Bitget REST client.
+#
+#   secrets-exec bitget-read accounts    USDT-M futures accounts + spot assets (balances)
+#   secrets-exec bitget-read positions   USDT-M futures open positions
+#   secrets-exec bitget-read bills       futures account bills, fixed trailing 7-day window, plus a `wallet`
+#                                      section: spot-wallet deposit and withdrawal records, fixed trailing
+#                                      28-day window.
+#   secrets-exec bitget-read keyinfo     what the API key is allowed to do (verdict allow|deny|error)
+#   secrets-exec bitget-read check       NO network. Presence/safety booleans only. Exit 0 iff all "yes".
+#
+# Read-only contract:
+#   * A closed argument set; each word maps to constant paths and queries below. No
+#     other arguments, no caller time window, no caller host, path or URL.
+#   * GET only, fixed host api.bitget.com, https only, no redirects followed.
+#   * Reads BITGET_API_KEY, BITGET_API_SECRET, BITGET_PASSPHRASE from the environment
+#     (secrets-exec multi-key row). A credential containing a control character,
+#     non-ASCII or a double quote is refused: `esc()` does not escape newlines and a
+#     newline would become a new curl option.
+#   * The signature is HMAC-SHA256 computed by Python stdlib (absolute path, isolated
+#     mode). The secret reaches Python ONLY as an environment variable of that one
+#     process; the openssl CLI is not used because it would put the key in argv.
+#   * Headers (key, signature, passphrase) reach curl ONLY through the config on stdin
+#     (`curl -q --config -`, `-q` first). Secrets are never `jq --arg` values, never
+#     argv, never a file. The original env vars are unset after they are copied.
+#   * Output is JSON on stdout. stderr carries ids, numeric codes and fixed words ONLY.
+#
+# Exit codes: 0 ok · 2 refused (usage / credential problem) · 3 API/transport failure ·
+#             5 keyinfo verdict "deny" (output is still printed).
+#
+# Egress is direct unless EGRESS_PROXY is set at installation to a reviewed constant;
+# it must never come from an environment variable or argument.
+#
+# KEYINFO ALLOW-LISTS ARE DEFAULT DENY: only the exact codes in ALLOW_* below pass;
+# anything else is "deny" with the codes printed for review. Some v2 read codes are
+# inferred from naming rather than independently verified documentation. Review the
+# accepted codes against the exchange's current documentation before installation.
+# Exact codes only, never a suffix rule: a new or write code must not silently pass.
+# A keyinfo verdict is not a substitute for creating a restricted read-only API key.
+#
+# Tests source this file (the source guard at the bottom keeps main from running) and
+# replace the shell functions `curl_run`, `pause` and `now_ms` with stubs. There is
+# deliberately NO environment override of the curl binary: a caller-chosen binary is an
+# exfil path (see the secrets-exec header).
+set -uo pipefail
+export LC_ALL=C
+
+readonly JQ='/usr/bin/jq'
+readonly PY='/usr/bin/python3'
+readonly API_BASE='https://api.bitget.com'
+readonly EGRESS_PROXY=''
+readonly TIMEOUT_SECS=30
+readonly MAX_BYTES=10485760
+readonly CALL_PAUSE=0.3
+readonly PAGE_PAUSE=0.5
+readonly BILLS_WINDOW_MS=$((7 * 24 * 3600 * 1000))
+readonly BILLS_PAGE_LIMIT=100
+readonly BILLS_MAX_PAGES=20
+# Spot-wallet deposit/withdrawal records (Bitget docs: startTime and endTime REQUIRED, limit max 100, idLessThan = the
+# smallest orderId of the previous page). The docs do not state a maximum startTime..endTime span, so the window is
+# read in 7-day chunks (the span the bills endpoint is known to accept), 4 chunks = 28 days. A record can be re-read by
+# the next run (and by the next chunk's shared boundary millisecond): deduplicate by orderId here;
+# downstream storage should also account for overlapping windows.
+readonly RECORDS_CHUNK_MS=$((7 * 24 * 3600 * 1000))
+readonly RECORDS_CHUNKS=4
+readonly RECORDS_PAGE_LIMIT=100
+readonly RECORDS_MAX_PAGES=5
+
+# Constant endpoints (Bitget v2 classic API; v3 info endpoint for unified accounts).
+readonly P_MIX_ACCOUNTS='/api/v2/mix/account/accounts?productType=USDT-FUTURES'
+readonly P_SPOT_ASSETS='/api/v2/spot/account/assets'
+readonly P_MIX_POSITIONS='/api/v2/mix/position/all-position?productType=USDT-FUTURES&marginCoin=USDT'
+readonly P_MIX_BILLS='/api/v2/mix/account/bill'
+readonly P_DEPOSIT_RECORDS='/api/v2/spot/wallet/deposit-records'
+readonly P_WITHDRAWAL_RECORDS='/api/v2/spot/wallet/withdrawal-records'
+readonly P_V2_INFO='/api/v2/spot/account/info'
+readonly P_V3_INFO='/api/v3/account/info'
+
+# keyinfo default-deny allow-lists (see the warning in the header).
+readonly ALLOW_V2_AUTHORITIES='["readonly","read_only","read-only","read","stor","wtor","taxr","chor","coor","ttor","pllr","p2pr","smor","cpor"]'
+readonly ALLOW_V3_PERMTYPE='["read-only","read_only","readonly"]'
+# Accept only the management/read scope shown; review current API semantics before widening.
+readonly ALLOW_V3_PERMISSIONS='["uta_mgt"]'
+
+# Signing program: fixed text, no secret inside it. Secret comes from the process env.
+readonly SIGN_PY='import base64, hashlib, hmac, os, sys
+ts, method, target = sys.argv[1], sys.argv[2], sys.argv[3]
+secret = os.environ["BITGET_API_SECRET"].encode()
+digest = hmac.new(secret, (ts + method + target).encode(), hashlib.sha256).digest()
+sys.stdout.write(base64.b64encode(digest).decode())'
+
+# A call is "ok" when curl succeeded and Bitget answered code 00000 with an object.
+readonly CALL_OK_JQ='.rc == 0 and ((.body | type) == "object") and (.body.code == "00000")'
+
+_cred_key=''
+_cred_secret=''
+_cred_pass=''
+
+die() { printf 'bitget-read: %s\n' "$2" >&2; exit "$1"; }
+refuse() { die 2 "$1"; }
+
+usage() {
+  echo "usage: secrets-exec bitget-read accounts|positions|bills|keyinfo|check" >&2
+  exit 2
+}
+
+# ── transport (stubbed in tests) ──────────────────────────────────────────────
+curl_run() { /usr/bin/curl -q --config -; }
+pause() { /usr/bin/sleep "$1"; }
+now_ms() { /usr/bin/date +%s%3N; }
+
+# Escape a value for a double-quoted curl config string. Quotes and control
+# characters are rejected earlier, so only the backslash needs handling here.
+esc() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s' "$s"; }
+
+# ── credential checks ─────────────────────────────────────────────────────────
+# env_state <ENV NAME> -> missing | unsafe | ok.  The value never leaves this function.
+env_state() {
+  local v="${!1-}"
+  if [[ -z $v ]]; then printf 'missing'; return 0; fi
+  if ((${#v} > 512)) || [[ $v == *'"'* ]] || [[ $v =~ [^[:print:]] ]]; then
+    printf 'unsafe'; return 0
+  fi
+  printf 'ok'
+}
+
+load_creds() {
+  local name st
+  for name in BITGET_API_KEY BITGET_API_SECRET BITGET_PASSPHRASE; do
+    st="$(env_state "$name")"
+    [[ $st == ok ]] || refuse "$name is $st (wiring test: secrets-exec bitget-read check)"
+  done
+  _cred_key="$BITGET_API_KEY"
+  _cred_secret="$BITGET_API_SECRET"
+  _cred_pass="$BITGET_PASSPHRASE"
+  # Children (curl, sleep, jq) never need the originals; Python gets the secret per call.
+  unset BITGET_API_KEY BITGET_API_SECRET BITGET_PASSPHRASE
+}
+
+# ── signing and request construction ──────────────────────────────────────────
+# bitget_sign <timestamp-ms> <request-target>   prints base64(HMAC-SHA256(secret, ts+GET+target))
+bitget_sign() {
+  BITGET_API_SECRET="$_cred_secret" "$PY" -I -S -c "$SIGN_PY" "$1" GET "$2"
+}
+
+# bitget_config <request-target> <timestamp-ms> <signature>   prints a curl config
+bitget_config() {
+  printf 'silent\nshow-error\nfail-with-body\ngloboff\n'
+  printf 'proto = "=https"\n'
+  printf 'request = "GET"\n'
+  printf 'max-time = %s\n' "$TIMEOUT_SECS"
+  printf 'max-filesize = %s\n' "$MAX_BYTES"
+  if [[ -n $EGRESS_PROXY ]]; then printf 'proxy = "%s"\n' "$EGRESS_PROXY"; fi
+  printf 'header = "ACCESS-KEY: %s"\n' "$(esc "$_cred_key")"
+  printf 'header = "ACCESS-SIGN: %s"\n' "$(esc "$3")"
+  printf 'header = "ACCESS-TIMESTAMP: %s"\n' "$2"
+  printf 'header = "ACCESS-PASSPHRASE: %s"\n' "$(esc "$_cred_pass")"
+  printf 'header = "locale: en-US"\n'
+  printf 'header = "Content-Type: application/json"\n'
+  printf 'url = "%s%s"\n' "$API_BASE" "$1"
+  return 0
+}
+
+# bitget_get <request-target>   body on stdout, curl's exit status as the return code
+bitget_get() {
+  local ts sig
+  ts="$(now_ms)"
+  sig="$(bitget_sign "$ts" "$1")" || return 70
+  [[ -n $sig ]] || return 70
+  curl_run < <(bitget_config "$1" "$ts" "$sig")
+}
+
+# as_json <text>   compact JSON if the text is valid JSON, otherwise the word null
+as_json() {
+  if "$JQ" -e . >/dev/null 2>&1 <<<"$1"; then "$JQ" -c . <<<"$1"; else printf 'null'; fi
+}
+
+# call_json <request-target>   prints {"rc":<curl rc>,"body":<json|null>}
+call_json() {
+  local body rc
+  body="$(bitget_get "$1")"; rc=$?
+  body="$(as_json "$body")"
+  printf '{"rc":%s,"body":%s}\n' "$rc" "$body"
+}
+
+call_is_ok() { "$JQ" -e "$CALL_OK_JQ" >/dev/null 2>&1 <<<"$1"; }
+
+# report_failure <what> <call-json>   stderr line with numeric/short codes only
+report_failure() {
+  local rc code
+  rc="$("$JQ" -r '.rc' <<<"$2" 2>/dev/null)"
+  code="$("$JQ" -r '(try .body.code catch null) // "none"' <<<"$2" 2>/dev/null)"
+  [[ $rc =~ ^[0-9]{1,3}$ ]] || rc=unknown
+  [[ $code =~ ^[A-Za-z0-9_]{1,16}$ ]] || code=unparsed
+  printf 'bitget-read: %s failed curl_rc=%s bitget_code=%s\n' "$1" "$rc" "$code" >&2
+}
+
+# ── subcommands ───────────────────────────────────────────────────────────────
+cmd_accounts() {
+  local mix spot
+  mix="$(call_json "$P_MIX_ACCOUNTS")"
+  pause "$CALL_PAUSE"
+  spot="$(call_json "$P_SPOT_ASSETS")"
+  printf '%s\n%s\n' "$mix" "$spot" | "$JQ" -c -s \
+    '{schema: "example.bitget/accounts/1", calls: {mix_accounts: .[0], spot_assets: .[1]}}'
+  # The futures call is required; spot is best-effort (its failure is visible in the output).
+  if ! call_is_ok "$mix"; then report_failure accounts "$mix"; return 3; fi
+  call_is_ok "$spot" || printf 'bitget-read: accounts spot call not ok (futures ok)\n' >&2
+  return 0
+}
+
+cmd_positions() {
+  local pos
+  pos="$(call_json "$P_MIX_POSITIONS")"
+  printf '%s\n' "$pos" | "$JQ" -c '{schema: "example.bitget/positions/1", calls: {mix_positions: .}}'
+  if ! call_is_ok "$pos"; then report_failure positions "$pos"; return 3; fi
+  return 0
+}
+
+# Fixed trailing 7-day window, paged inside the script (idLessThan = previous endId),
+# deduplicated on billId. The caller supplies no time arguments.
+cmd_bills() {
+  local end start target cursor='' pages=0 bills='[]' complete=false err=null
+  local call page n endid
+  end="$(now_ms)"
+  start=$((end - BILLS_WINDOW_MS))
+  while ((pages < BILLS_MAX_PAGES)); do
+    target="${P_MIX_BILLS}?productType=USDT-FUTURES&startTime=${start}&endTime=${end}&limit=${BILLS_PAGE_LIMIT}"
+    if [[ -n $cursor ]]; then target="${target}&idLessThan=${cursor}"; fi
+    call="$(call_json "$target")"
+    pages=$((pages + 1))
+    if ! call_is_ok "$call"; then
+      err="$("$JQ" -c '{rc: .rc, code: ((try .body.code catch null) // "none")}' <<<"$call")"
+      report_failure bills "$call"
+      break
+    fi
+    page="$("$JQ" -c '(.body.data.bills? // []) | if type == "array" then . else [] end' <<<"$call")"
+    n="$("$JQ" 'length' <<<"$page")"
+    bills="$(printf '%s\n%s\n' "$bills" "$page" | "$JQ" -c -s '.[0] + .[1]')"
+    endid="$("$JQ" -r '(.body.data.endId? // "") | tostring' <<<"$call")"
+    if ((n == 0)) || [[ -z $endid ]] || ((n < BILLS_PAGE_LIMIT)); then complete=true; break; fi
+    if [[ ! $endid =~ ^[0-9]{1,40}$ ]]; then err='{"rc":0,"code":"bad_endid"}'; break; fi
+    cursor="$endid"
+    pause "$PAGE_PAUSE"
+  done
+  # shellcheck disable=SC2016  # $vars in the jq program are jq variables
+  printf '%s\n' "$bills" | "$JQ" -c \
+    --argjson s "$start" --argjson e "$end" --argjson p "$pages" \
+    --argjson c "$complete" --argjson err "$err" \
+    '{schema: "example.bitget/bills/1", window: {start_ms: $s, end_ms: $e}, pages: $p,
+      complete: $c, error: $err,
+      bills: (unique_by(.billId) | sort_by(try (.cTime | tonumber) catch 0))}'
+  if [[ $err == null ]]; then return 0; fi
+  return 3
+}
+
+# records_feed <deposits|withdrawals> <end-ms>   one JSON object on stdout:
+#   {complete, error, pages, records}   records = orderId, coin, size, status, dest, fee, cTime, uTime ONLY
+# (addresses, tx hashes and client ids are not copied). The feed name picks one of two constant paths; nothing
+# else reaches a request. An API failure or an unexpected shape stops THIS feed (error says which); a feed that
+# hit the page cap is reported complete=false. Cursor values are digits-only orderIds taken from the previous page.
+records_feed() {
+  local feed="$1" end="$2" path chunk=0 cend cstart cpages target cursor call page n minid
+  local pages=0 recs='[]' complete=true err=null
+  case "$feed" in
+    deposits) path="$P_DEPOSIT_RECORDS" ;;
+    withdrawals) path="$P_WITHDRAWAL_RECORDS" ;;
+    *) return 64 ;;
+  esac
+  while ((chunk < RECORDS_CHUNKS)) && [[ $err == null ]]; do
+    cend=$((end - chunk * RECORDS_CHUNK_MS))
+    cstart=$((cend - RECORDS_CHUNK_MS))
+    cursor=''
+    cpages=0
+    while true; do
+      if ((cpages >= RECORDS_MAX_PAGES)); then complete=false; break; fi
+      target="${path}?startTime=${cstart}&endTime=${cend}&limit=${RECORDS_PAGE_LIMIT}"
+      if [[ -n $cursor ]]; then target="${target}&idLessThan=${cursor}"; fi
+      call="$(call_json "$target")"
+      pages=$((pages + 1))
+      cpages=$((cpages + 1))
+      if ! call_is_ok "$call"; then
+        err="$("$JQ" -c '{rc: .rc, code: ((try .body.code catch null) // "none")}' <<<"$call")"
+        report_failure "wallet $feed" "$call"
+        break
+      fi
+      page="$("$JQ" -c '(.body.data? // null)
+        | if type == "array" and all(.[]; type == "object" and ((.orderId? | type) == "string")
+                                          and (.orderId | test("^[0-9]{1,40}$")))
+          then map({orderId, coin, size, status, dest, fee, cTime, uTime}) else null end' <<<"$call")"
+      if [[ $page == null ]]; then
+        err='{"rc":0,"code":"bad_shape"}'
+        printf 'bitget-read: wallet %s reply has an unexpected shape\n' "$feed" >&2
+        break
+      fi
+      n="$("$JQ" 'length' <<<"$page")"
+      recs="$(printf '%s\n%s\n' "$recs" "$page" | "$JQ" -c -s '.[0] + .[1]')"
+      if ((n < RECORDS_PAGE_LIMIT)); then break; fi
+      minid="$("$JQ" -r 'map(.orderId) | sort_by([length, .]) | .[0]' <<<"$page")"
+      if [[ ! $minid =~ ^[0-9]{1,40}$ ]]; then err='{"rc":0,"code":"bad_orderid"}'; break; fi
+      cursor="$minid"
+      pause "$PAGE_PAUSE"
+    done
+    chunk=$((chunk + 1))
+    if ((chunk < RECORDS_CHUNKS)) && [[ $err == null ]]; then pause "$CALL_PAUSE"; fi
+  done
+  if [[ $err != null ]]; then complete=false; fi
+  # shellcheck disable=SC2016  # $vars in the jq program are jq variables
+  printf '%s\n' "$recs" | "$JQ" -c --argjson p "$pages" --argjson c "$complete" --argjson err "$err" \
+    '{complete: $c, error: $err, pages: $p,
+      records: (unique_by(.orderId) | sort_by(try (.cTime | tonumber) catch 0))}'
+}
+
+# `bills` combines futures bills with a `wallet` section containing spot-wallet deposit
+# and withdrawal records. The exit code is the bills exit code: a wallet-read failure
+# is reported in its section and on stderr. Check each feed's complete/error fields;
+# success of the top-level command does not prove every wallet feed succeeded.
+cmd_bills_records() {
+  local out rc end start dep wd
+  out="$(cmd_bills)"; rc=$?
+  end="$(now_ms)"
+  start=$((end - RECORDS_CHUNKS * RECORDS_CHUNK_MS))
+  pause "$CALL_PAUSE"
+  dep="$(records_feed deposits "$end")"
+  pause "$CALL_PAUSE"
+  wd="$(records_feed withdrawals "$end")"
+  # shellcheck disable=SC2016  # $vars in the jq program are jq variables
+  printf '%s\n%s\n%s\n' "$out" "$dep" "$wd" | "$JQ" -c -s \
+    --argjson s "$start" --argjson e "$end" --argjson c "$RECORDS_CHUNK_MS" \
+    '.[0] + {wallet: {schema: "example.bitget/wallet/1", window: {start_ms: $s, end_ms: $e, chunk_ms: $c},
+                      deposits: .[1], withdrawals: .[2]}}'
+  return "$rc"
+}
+
+# keyinfo: DEFAULT DENY. Both the v2 (classic) and v3 (unified) info endpoints are asked;
+# every endpoint that answers must pass its allow-list, and at least one must answer.
+# userId / parentId / inviterId and the IP addresses themselves are NOT copied to the output.
+# shellcheck disable=SC2016  # $vars below are jq variables, not shell expansions
+readonly KEYINFO_JQ='
+def good($rc; $b): ($rc == 0) and (($b | type) == "object") and ($b.code == "00000")
+                   and ((($b.data) | type) == "object");
+def strs($x): (($x | type) == "array") and ($x | all(.[]; type == "string"));
+def ipcount($b): ((try (($b.data.ips // "") | tostring) catch "") | split(",")
+                  | map(select(length > 0)) | length);
+(.) as [$rc2, $b2, $rc3, $b3]
+| good($rc2; $b2) as $ok2
+| good($rc3; $b3) as $ok3
+| (if $ok2 then ($b2.data.authorities // []) else [] end) as $auth
+| (if $ok3 then ($b3.data.permissions // []) else [] end) as $perms
+| (if $ok3 then ($b3.data.permType // "") else "" end) as $pt
+| (if $ok2 then (strs($auth) and ($auth | length) > 0
+                 and ($auth | all(.[]; . as $x | $allow2 | index($x) != null)))
+   else null end) as $pass2
+| (if $ok3 then ((($pt | type) == "string") and ($allowpt | index($pt | ascii_downcase) != null)
+                 and strs($perms) and ($perms | length) > 0
+                 and ($perms | all(.[]; . as $x | $allow3 | index($x) != null)))
+   else null end) as $pass3
+| ([$pass2, $pass3] | map(select(. != null))) as $p
+| (if ($p | length) == 0 then "error" elif ($p | all) then "allow" else "deny" end) as $verdict
+| {schema: "example.bitget/keyinfo/1", verdict: $verdict,
+   v2: {rc: $rc2, ok: $ok2, code: (try $b2.code catch null),
+        authorities: (if $ok2 then $auth else null end),
+        ips_count: (if $ok2 then ipcount($b2) else null end)},
+   v3: {rc: $rc3, ok: $ok3, code: (try $b3.code catch null),
+        perm_type: (if $ok3 then $pt else null end),
+        permissions: (if $ok3 then $perms else null end),
+        ips_count: (if $ok3 then ipcount($b3) else null end)}}
+'
+
+cmd_keyinfo() {
+  local c2 c3 out verdict
+  c2="$(call_json "$P_V2_INFO")"
+  pause "$CALL_PAUSE"
+  c3="$(call_json "$P_V3_INFO")"
+  out="$(printf '%s\n%s\n' "$c2" "$c3" | "$JQ" -c -s \
+    --argjson allow2 "$ALLOW_V2_AUTHORITIES" --argjson allowpt "$ALLOW_V3_PERMTYPE" \
+    --argjson allow3 "$ALLOW_V3_PERMISSIONS" \
+    '[.[0].rc, .[0].body, .[1].rc, .[1].body] | '"$KEYINFO_JQ")"
+  printf '%s\n' "$out"
+  verdict="$("$JQ" -r '.verdict' <<<"$out")"
+  case "$verdict" in
+    allow) return 0 ;;
+    deny) printf 'bitget-read: keyinfo verdict=deny (permission codes are in the output)\n' >&2; return 5 ;;
+    *) printf 'bitget-read: keyinfo verdict=error (no info endpoint answered)\n' >&2; return 3 ;;
+  esac
+}
+
+# check_line <ENV NAME>: two booleans, returns 1 when not ok.
+check_line() {
+  local st
+  st="$(env_state "$1")"
+  case "$st" in
+    ok) printf '%s present: yes\n%s safe: yes\n' "$1" "$1" ;;
+    missing) printf '%s present: no\n%s safe: no\n' "$1" "$1"; return 1 ;;
+    *) printf '%s present: yes\n%s safe: no\n' "$1" "$1"; return 1 ;;
+  esac
+}
+
+cmd_check() {
+  local ok=0 sig=''
+  check_line BITGET_API_KEY || ok=2
+  check_line BITGET_API_SECRET || ok=2
+  check_line BITGET_PASSPHRASE || ok=2
+  if [[ $(env_state BITGET_API_SECRET) == ok ]]; then
+    _cred_secret="$BITGET_API_SECRET"
+    sig="$(bitget_sign 0 /check 2>/dev/null)"
+    _cred_secret=''
+  fi
+  if [[ -n $sig ]]; then printf 'signer runs: yes\n'; else printf 'signer runs: no\n'; ok=2; fi
+  if [[ -x $JQ ]]; then printf 'jq available: yes\n'; else printf 'jq available: no\n'; ok=2; fi
+  return "$ok"
+}
+
+main() {
+  [[ $# -eq 1 ]] || usage
+  case "$1" in
+    check) cmd_check ;;
+    accounts) load_creds; cmd_accounts ;;
+    positions) load_creds; cmd_positions ;;
+    bills) load_creds; cmd_bills_records ;;
+    keyinfo) load_creds; cmd_keyinfo ;;
+    *) usage ;;
+  esac
+}
+
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  main "$@"
+fi

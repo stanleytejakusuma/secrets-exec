@@ -1,0 +1,442 @@
+#!/bin/bash
+# mexc-read — example read-only MEXC spot + futures REST client.
+#
+#   secrets-exec mexc-read accounts    spot balances (GET /api/v3/account), projected to asset/free/locked
+#   secrets-exec mexc-read wallet      crypto deposit + withdrawal history, fixed trailing window, deduplicated
+#   secrets-exec mexc-read futures     futures assets: total equity per currency (not margin + balance + PnL)
+#   secrets-exec mexc-read keyinfo     what the API key may do (verdict allow|deny|error), see the limit below
+#   secrets-exec mexc-read check       NO network. Presence/safety booleans only. Exit 0 iff all "yes".
+#
+# Read-only contract (same transport pattern as bitget-read):
+#   * A closed argument set; each word maps to constant paths and queries below. No other
+#     arguments, no caller time window, no caller host, path or URL.
+#   * GET only, fixed host api.mexc.com, https only, no redirects followed (no `location` option).
+#     There is no POST/PUT/DELETE and no order, transfer or withdrawal endpoint anywhere in this file.
+#   * Reads MEXC_API_KEY and MEXC_API_SECRET from the environment (secrets-exec multi-key row). A
+#     credential containing a control character, non-ASCII or a double quote is refused: `esc()` does
+#     not escape newlines and a newline would become a new curl option. MEXC_API_KEY also goes into a
+#     URL query (keyinfo), so it must be [A-Za-z0-9_-] only.
+#   * The spot signature is HMAC-SHA256 (lowercase hex) of the query string; futures signs key+timestamp
+#     (the fixed account-assets GET has no business parameters). Both are computed by Python stdlib
+#     (absolute path, isolated mode). The secret reaches Python ONLY as an environment variable of that
+#     one process and the message arrives on stdin, so neither is on any argv. The openssl CLI is not
+#     used because it would put the key in argv.
+#   * The api-key header reaches curl ONLY through the config on stdin (`curl -q --config -`, `-q`
+#     first). Secrets are never `jq --arg` values, never argv, never a file. The original env vars are
+#     unset after they are copied.
+#   * Output is JSON on stdout. stderr carries numeric codes and fixed words ONLY.
+#   * Projections omit full on-chain transaction ids, which can resemble private keys in log scans.
+#     `ref` keeps the first 24 + ".." + last 16 characters (not collision-free and not anonymization).
+#     Withdrawal addresses are emitted only when they look like on-chain addresses; output still
+#     contains sensitive financial data and is not safe for indiscriminate logging.
+#
+# Exit codes: 0 ok · 2 refused (usage / credential problem) · 3 API/transport failure ·
+#             5 keyinfo verdict "deny" (output is still printed).
+#
+# Facts taken from MEXC's official Spot V3 docs (https://www.mexc.com/api-docs/spot-v3, mirrored at
+# mexcdevelop.github.io/apidocs/spot_v3_en):
+#   host https://api.mexc.com · header X-MEXC-APIKEY · signature = HMAC-SHA256(secret, totalParams) as
+#   lowercase hex, appended as &signature= · signed endpoints need timestamp (ms), recvWindow optional
+#   (default 5000, max 60000) · GET /api/v3/account (balances[].asset/free/locked) · GET
+#   /api/v3/capital/deposit/hisrec and GET /api/v3/capital/withdraw/history (startTime/endTime/limit,
+#   limit default and max 1000; default span 7 days, "can query 90 days data at most") · GET
+#   /api/v3/apiKeyInfo (accessKey is a mandatory parameter;
+#   `permissions` is a comma-separated string; `status` VALID|DELETE|FROZEN; remainingValidity -999 =
+#   permanent, 0 = expired).
+# This example's offline tests do not verify live entitlement, balances, non-empty history or
+# whether withdrawal amount includes the fee. Each request spans less than 7 days. The history
+# endpoints expose no cursor: a segment returning `limit` rows is incomplete, never silently truncated.
+#
+# THE GUARANTEE, AND ITS LIMIT. Two independent things make this consumer unable to move funds:
+#   (a) STRUCTURAL, unconditional: the closed GET-only endpoint set above. Whatever permissions the key
+#       has, this script cannot place an order, transfer or withdraw. It holds even with a stronger key.
+#   (b) keyinfo, a CHECK ON THE KEY: GET /api/v3/apiKeyInfo asked about the key this process is using,
+#       compared against an exact allow-list of read permissions (default deny). It is MEXC's
+#       self-report of the key's permission set. It does NOT prove: that the set cannot change after the
+#       check (an owner can edit the key in the MEXC UI; the next run's keyinfo notices, this one does
+#       not), that the key has no OTHER ability the docs do not list (an unknown code is denied, but a
+#       capability with no code is invisible), or that the endpoint behaves as documented (it is new
+#       and unverified live; any surprise is verdict "error", never "allow"). The account-level flags
+#       canTrade/canWithdraw/canDeposit in /api/v3/account describe the ACCOUNT, not the key: they are
+#       neither read nor relied on. Verdict "allow" requires ALL of: the call succeeded; the reply names
+#       this very key (accessKey/apikey equals ours); status VALID; remainingValidity -999 or > 0;
+#       `permissions` is a non-empty string whose every code is in the allow-list; the required code is
+#       present. A write code, an unknown code or a missing required code is "deny"; anything that
+#       cannot be established is "error". Permission codes are printed so a human can review them.
+#   The allow-list is written as (scope, area) pairs plus the fixed suffix _READ and composed in jq.
+#   This produces an exact list of six codes, never a suffix-matching rule. Review the exchange's
+#   current permission documentation before installation or widening.
+#
+# Egress: direct. If the first live call shows MEXC rejecting the source IP (error 700006), bind the key
+# to this host's egress IP in the MEXC UI; an egress proxy would be a constant here, never an env var.
+#
+# Tests source this file (the source guard at the bottom keeps main from running) and replace the shell
+# functions `curl_run`, `pause` and `now_ms` with stubs. Runtime target is Linux with GNU date (%s%3N),
+# not portable BSD date. max-filesize is defence in depth, NOT a guaranteed hard bound for every
+# chunked/unknown-length response on every curl version. There is deliberately NO environment override of
+# the curl binary: a caller-chosen binary is an exfil path (see the secrets-exec header).
+set -uo pipefail
+export LC_ALL=C
+
+readonly JQ='/usr/bin/jq'
+readonly PY='/usr/bin/python3'
+readonly API_BASE='https://api.mexc.com'
+readonly EGRESS_PROXY=''
+readonly TIMEOUT_SECS=15
+readonly MAX_BYTES=10485760
+readonly RECV_WINDOW=10000
+readonly CALL_PAUSE=0.3
+readonly PAGE_PAUSE=0.5
+# History window: HISTORY_SEGMENTS requests per endpoint, each spanning HISTORY_SEGMENT_MS (7 days less one
+# second, so never over the documented 7-day span), newest first. About 35 days in total.
+readonly HISTORY_SEGMENT_MS=$((7 * 24 * 3600 * 1000 - 1000))
+readonly HISTORY_SEGMENTS=5
+readonly HISTORY_LIMIT=1000
+
+# Constant endpoints (MEXC Spot V3). Nothing else is ever requested.
+readonly P_ACCOUNT='/api/v3/account'
+readonly P_DEPOSITS='/api/v3/capital/deposit/hisrec'
+readonly P_WITHDRAWALS='/api/v3/capital/withdraw/history'
+readonly P_KEYINFO='/api/v3/apiKeyInfo'
+readonly P_FUTURES='/api/v1/private/account/assets'
+
+# keyinfo default-deny allow-list, see the header. Codes are composed as SCOPE_AREA_READ.
+readonly ALLOW_SCOPES='[["SPOT","ACCOUNT"],["SPOT","DEAL"],["SPOT","TRANSFER"],["SPOT","WITHDRAW"],["CONTRACT","ACCOUNT"],["CONTRACT","DEAL"]]'
+readonly REQUIRED_SCOPES='[["SPOT","ACCOUNT"]]'
+
+# Signing program: fixed text, no secret inside it. Secret comes from the process env, message from stdin.
+readonly SIGN_PY='import hashlib, hmac, os, sys
+secret = os.environ["MEXC_API_SECRET"].encode()
+message = sys.stdin.read().rstrip("\n").encode()
+sys.stdout.write(hmac.new(secret, message, hashlib.sha256).hexdigest())'
+
+# A call is "ok" for a list endpoint when curl succeeded and MEXC answered a JSON array; for an object
+# endpoint when it answered an object that carries no error code (MEXC errors are {"code":N,"msg":...}).
+readonly LIST_OK_JQ='.rc == 0 and ((.body | type) == "array")'
+readonly OBJECT_OK_JQ='.rc == 0 and ((.body | type) == "object") and (((.body.code? // 0) | tostring) | IN("0", "200"))'
+readonly ACCOUNT_OK_JQ='('"$OBJECT_OK_JQ"') and ((.body.balances | type) == "array")'
+
+_cred_key=''
+_cred_secret=''
+
+die() { printf 'mexc-read: %s\n' "$2" >&2; exit "$1"; }
+refuse() { die 2 "$1"; }
+
+usage() {
+  echo "usage: secrets-exec mexc-read accounts|wallet|futures|keyinfo|check" >&2
+  exit 2
+}
+
+# ── transport (stubbed in tests) ──────────────────────────────────────────────
+curl_run() { /usr/bin/curl -q --config -; }
+pause() { /usr/bin/sleep "$1"; }
+now_ms() { /usr/bin/date +%s%3N; }
+
+# Escape a value for a double-quoted curl config string. Quotes and control
+# characters are rejected earlier, so only the backslash needs handling here.
+esc() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s' "$s"; }
+
+# ── credential checks ─────────────────────────────────────────────────────────
+# env_state <ENV NAME> -> missing | unsafe | ok.  The value never leaves this function.
+env_state() {
+  local v="${!1-}"
+  if [[ -z $v ]]; then printf 'missing'; return 0; fi
+  if ((${#v} > 512)) || [[ $v == *'"'* ]] || [[ $v =~ [^[:print:]] ]]; then
+    printf 'unsafe'; return 0
+  fi
+  if [[ $1 == MEXC_API_KEY ]] && [[ ! $v =~ ^[A-Za-z0-9_-]{1,128}$ ]]; then
+    printf 'unsafe'; return 0
+  fi
+  printf 'ok'
+}
+
+load_creds() {
+  local name st
+  for name in MEXC_API_KEY MEXC_API_SECRET; do
+    st="$(env_state "$name")"
+    [[ $st == ok ]] || refuse "$name is $st (wiring test: secrets-exec mexc-read check)"
+  done
+  _cred_key="$MEXC_API_KEY"
+  _cred_secret="$MEXC_API_SECRET"
+  # Children (curl, sleep, jq) never need the originals; Python gets the secret per call.
+  unset MEXC_API_KEY MEXC_API_SECRET
+}
+
+# ── signing and request construction ──────────────────────────────────────────
+# mexc_sign <query-string>   prints hex(HMAC-SHA256(secret, query-string))
+mexc_sign() {
+  MEXC_API_SECRET="$_cred_secret" "$PY" -I -S -c "$SIGN_PY" <<<"$1"
+}
+
+# Shared fixed GET transport configuration (headers differ by product).
+get_config() {
+  printf 'silent\nshow-error\nfail-with-body\ngloboff\n'
+  printf 'proto = "=https"\ntlsv1.2\n'
+  printf 'request = "GET"\n'
+  printf 'max-time = %s\n' "$TIMEOUT_SECS"
+  printf 'max-filesize = %s\n' "$MAX_BYTES"
+  if [[ -n $EGRESS_PROXY ]]; then printf 'proxy = "%s"\n' "$EGRESS_PROXY"; fi
+  return 0
+}
+
+# mexc_config <path> <query-without-signature> <signature>   prints a spot curl config
+mexc_config() {
+  get_config
+  printf 'header = "X-MEXC-APIKEY: %s"\n' "$(esc "$_cred_key")"
+  printf 'header = "Content-Type: application/json"\n'
+  printf 'url = "%s%s?%s&signature=%s"\n' "$API_BASE" "$1" "$2" "$3"
+  return 0
+}
+
+# mexc_get <path> <extra-query-or-empty>   body on stdout, curl's exit status as the return code.
+# The signed string is exactly the query that is sent (before &signature=): extra params first, then
+# timestamp and recvWindow.
+mexc_get() {
+  local ts q sig
+  ts="$(now_ms)"
+  q="${2:+$2&}timestamp=${ts}&recvWindow=${RECV_WINDOW}"
+  sig="$(mexc_sign "$q")" || return 70
+  [[ -n $sig ]] || return 70
+  curl_run < <(mexc_config "$1" "$q" "$sig") 2>/dev/null
+}
+
+# as_json <text>   compact JSON if the text is valid JSON, otherwise the word null
+as_json() {
+  if "$JQ" -e . >/dev/null 2>&1 <<<"$1"; then "$JQ" -c . <<<"$1"; else printf 'null'; fi
+}
+
+# call_json <path> <extra-query-or-empty>   prints {"rc":<curl rc>,"body":<json|null>}
+call_json() {
+  local body rc
+  body="$(mexc_get "$1" "$2")"; rc=$?
+  body="$(as_json "$body")"
+  printf '{"rc":%s,"body":%s}\n' "$rc" "$body"
+}
+
+call_ok() { "$JQ" -e "$1" >/dev/null 2>&1 <<<"$2"; }
+
+# report_failure <what> <call-json>   stderr line with numeric/short codes only
+report_failure() {
+  local rc code
+  rc="$("$JQ" -r '.rc' <<<"$2" 2>/dev/null)"
+  code="$("$JQ" -r '(try (.body | objects | .code) catch null) // "none"' <<<"$2" 2>/dev/null)"
+  [[ $rc =~ ^[0-9]{1,3}$ ]] || rc=unknown
+  [[ $code =~ ^[A-Za-z0-9_-]{1,16}$ ]] || code=unparsed
+  printf 'mexc-read: %s failed curl_rc=%s mexc_code=%s\n' "$1" "$rc" "$code" >&2
+}
+
+# ── subcommands ───────────────────────────────────────────────────────────────
+# shellcheck disable=SC2016  # $vars in the jq program are jq variables
+readonly ACCOUNTS_JQ='{schema: "example.mexc/accounts/1",
+  call: {rc: .rc, code: ((.body | objects | .code) // null),
+         body: (.body | if type == "object" and (.balances | type) == "array"
+                        then {accountType, updateTime, balances: [.balances[] | {asset, free, locked}]}
+                        else null end)}}'
+
+cmd_accounts() {
+  local call
+  call="$(call_json "$P_ACCOUNT" '')"
+  printf '%s\n' "$call" | "$JQ" -c "$ACCOUNTS_JQ"
+  if ! call_ok "$ACCOUNT_OK_JQ" "$call"; then report_failure accounts "$call"; return 3; fi
+  return 0
+}
+
+# Futures REST contract: https://www.mexc.com/api-docs/futures/integration-guide and
+# /account-and-trading-endpoints/get-all-account-assets. GET assets has no business parameters,
+# so HMAC-SHA256 message = accessKey + timestamp + empty string, NOT spot timestamp/query.
+# Signature/ApiKey/Request-Time/Recv-Window are headers; Recv-Window is seconds (10), not milliseconds.
+# View Account Details permission, rate 20 requests / 2 s. A key listing CONTRACT_ACCOUNT_READ does
+# NOT prove actual API entitlement; a denied response is unknown, never a zero assets snapshot.
+# Only equity (documented Total equity) is valued. Unrealized PnL, bonus, margin and available/cash
+# balances are NOT added to it. No position request is needed to obtain the documented equity.
+futures_config() {
+  get_config
+  printf 'header = "ApiKey: %s"\n' "$(esc "$_cred_key")"
+  printf 'header = "Request-Time: %s"\n' "$1"
+  printf 'header = "Signature: %s"\n' "$2"
+  printf 'header = "Recv-Window: 10"\n'
+  printf 'url = "%s%s"\n' "$API_BASE" "$P_FUTURES"
+}
+
+cmd_futures() {
+  local ts sig body rc call
+  ts="$(now_ms)"
+  sig="$(mexc_sign "${_cred_key}${ts}")" || return 70
+  [[ -n $sig ]] || return 70
+  body="$(curl_run < <(futures_config "$ts" "$sig") 2>/dev/null)"; rc=$?
+  body="$(as_json "$body")"
+  call="$(printf '{"rc":%s,"body":%s}' "$rc" "$body")"
+  # shellcheck disable=SC2016
+  printf '%s\n' "$call" | "$JQ" -c '
+    (.rc == 0 and .body.success == true and .body.code == 0 and (.body.data | type) == "array") as $ok
+    | {schema: "example.mexc/futures/1", call: {rc: .rc, code: (.body.code // null),
+       body: (if $ok then [.body.data[] | {currency, equity, unrealized, bonus}] else null end)}}'
+  if ! call_ok '.rc == 0 and .body.success == true and .body.code == 0 and (.body.data | type) == "array"' "$call"; then
+    report_failure futures "$call"; return 3
+  fi
+  return 0
+}
+
+# One history request. Prints the call JSON; the caller decides what a failure means.
+history_call() {
+  call_json "$1" "startTime=${2}&endTime=${3}&limit=${HISTORY_LIMIT}"
+}
+
+# Deposits and withdrawals over the fixed trailing window: HISTORY_SEGMENTS requests per endpoint, each
+# under 7 days, deduplicated. The docs give no cursor, so a segment that returns HISTORY_LIMIT rows is
+# marked `truncated` and the whole result `complete:false`. The caller supplies no time arguments.
+# shellcheck disable=SC2016  # $vars in the jq programs are jq variables
+readonly DEPOSITS_JQ='def short: if type == "string" and length > 40 then .[0:24] + ".." + .[-16:] else . end;
+  [.[] | {coin, network, amount, status, insertTime, ref: (.txId | short),
+           origin: [.txId, .address, .addressTag], ambiguous: (.identity_ambiguous // false)}]
+  | group_by([.ref, .coin, .network, .amount, .insertTime])
+  | map((.[0] | del(.origin, .ambiguous)) +
+        (if any(.[]; .ambiguous) or ([.[].origin] | unique | length) > 1
+         then {identity_ambiguous: true} else {} end)) | sort_by(.insertTime)'
+# shellcheck disable=SC2016
+readonly WITHDRAWALS_JQ='def short: if type == "string" and length > 40 then .[0:24] + ".." + .[-16:] else . end;
+  def onchain: if type == "string" and test("^[A-Za-z0-9_-]{20,100}$") then . else null end;
+  [.[] | {id, coin, network, amount, status, transferType, transactionFee, applyTime, updateTime,
+          address: (.address | onchain), ref: ((.txId // .transHash) | short)}]
+  | unique_by(.id // [.coin, .amount, .applyTime]) | sort_by(.applyTime)'
+
+cmd_wallet() {
+  local end start seg_end seg_start i call page n err=null complete=true truncated=0
+  local deps='[]' wds='[]'
+  end="$(now_ms)"
+  start=$((end - HISTORY_SEGMENTS * HISTORY_SEGMENT_MS))
+  for ((i = 0; i < HISTORY_SEGMENTS; i++)); do
+    seg_end=$((end - i * HISTORY_SEGMENT_MS))
+    seg_start=$((seg_end - HISTORY_SEGMENT_MS))
+    call="$(history_call "$P_DEPOSITS" "$seg_start" "$seg_end")"
+    if ! call_ok "$LIST_OK_JQ" "$call"; then
+      err="$("$JQ" -c '{rc: .rc, code: ((try (.body | objects | .code) catch null) // "none"), step: "deposits"}' <<<"$call")"
+      report_failure deposits "$call"; complete=false; break
+    fi
+    page="$("$JQ" -c '.body' <<<"$call")"
+    n="$("$JQ" 'length' <<<"$page")"
+    if ((n >= HISTORY_LIMIT)); then truncated=$((truncated + 1)); complete=false; fi
+    # Duplicates across time segments may be the same row. Indistinguishable siblings WITHIN one response are not
+    # safely disambiguated; keep that uncertainty through projection/dedup instead of manufacturing a single flow.
+    deps="$(printf '%s\n%s\n' "$deps" "$page" | "$JQ" -c -s '
+      .[0] + (.[1] | group_by([.txId, .coin, .network, .amount, .insertTime])
+                   | map(if length > 1 then map(. + {identity_ambiguous: true}) else . end) | add // [] )')"
+    pause "$CALL_PAUSE"
+    call="$(history_call "$P_WITHDRAWALS" "$seg_start" "$seg_end")"
+    if ! call_ok "$LIST_OK_JQ" "$call"; then
+      err="$("$JQ" -c '{rc: .rc, code: ((try (.body | objects | .code) catch null) // "none"), step: "withdrawals"}' <<<"$call")"
+      report_failure withdrawals "$call"; complete=false; break
+    fi
+    page="$("$JQ" -c '.body' <<<"$call")"
+    n="$("$JQ" 'length' <<<"$page")"
+    if ((n >= HISTORY_LIMIT)); then truncated=$((truncated + 1)); complete=false; fi
+    wds="$(printf '%s\n%s\n' "$wds" "$page" | "$JQ" -c -s '.[0] + .[1]')"
+    if ((i + 1 < HISTORY_SEGMENTS)); then pause "$PAGE_PAUSE"; fi
+  done
+  deps="$("$JQ" -c "$DEPOSITS_JQ" <<<"$deps")"
+  wds="$("$JQ" -c "$WITHDRAWALS_JQ" <<<"$wds")"
+  # shellcheck disable=SC2016  # $vars in the jq program are jq variables
+  printf '%s\n%s\n' "$deps" "$wds" | "$JQ" -c -s \
+    --argjson s "$start" --argjson e "$end" --argjson g "$HISTORY_SEGMENTS" --argjson m "$HISTORY_SEGMENT_MS" \
+    --argjson c "$complete" --argjson t "$truncated" --argjson err "$err" \
+    '{schema: "example.mexc/wallet/1", window: {start_ms: $s, end_ms: $e, segments: $g, segment_ms: $m},
+      complete: $c, truncated: $t, error: $err, deposits: .[0], withdrawals: .[1]}'
+  if [[ $err == null ]]; then return 0; fi
+  return 3
+}
+
+# keyinfo: DEFAULT DENY, see the header for what "allow" proves and what it does not.
+# Not copied to the output: the key itself, the note, the creation time and the IP addresses (count only).
+# shellcheck disable=SC2016  # $vars below are jq variables, not shell expansions
+readonly KEYINFO_JQ='
+def codes($pairs): $pairs | map(.[0] + "_" + .[1] + "_READ");
+def safe: if type == "string" and test("^[A-Z_]{1,40}$") then . else "?" end;
+def csv($s): $s | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0));
+(.rc == 0 and ((.body | type) == "object") and (((.body.code? // 0) | tostring) | IN("0", "200"))) as $good
+| (if $good then .body else {} end) as $b
+| ($b.permissions) as $praw
+| (if ($praw | type) == "string" then csv($praw) else null end) as $perms
+| (codes($allow)) as $allowed
+| (codes($need)) as $required
+| (if $perms == null then [] else [$perms[] | select(. as $x | $allowed | index($x) == null)] end) as $bad
+| (if $perms == null then $required else [$required[] | select(. as $x | $perms | index($x) == null)] end) as $missing
+| ($b.accessKey // $b.apikey // $b.apiKey // "") as $echo
+| (if ($echo | type) != "string" or $echo == "" then "absent" elif $match == true then "match" else "mismatch" end) as $keyecho
+| ($b.status) as $status
+| ($b.remainingValidity) as $rv
+| (($rv | type) == "number" and ($rv == -999 or $rv > 0)) as $unexpired
+| (if $good | not then "error"
+   elif $perms == null or ($status | type) != "string" or $keyecho != "match" or ($rv | type) != "number" then "error"
+   elif $status != "VALID" or ($unexpired | not) then "error"
+   elif ($perms | length) == 0 or ($bad | length) > 0 or ($missing | length) > 0 then "deny"
+   else "allow" end) as $verdict
+| {schema: "example.mexc/keyinfo/1", verdict: $verdict, rc: .rc, ok: $good,
+   code: ((.body | objects | .code) // null),
+   key_echo: $keyecho,
+   status: (if $good then ($status | if type == "string" and test("^[A-Z]{1,12}$") then . else "?" end) else null end),
+   permissions: (if $perms == null then null else ($perms | map(safe)) end),
+   unknown_or_write: ($bad | map(safe)),
+   missing_required: $missing,
+   ips_count: (if $good then ((try (($b.ipWhiteList // "") | tostring) catch "") | split(",") | map(select(length > 0)) | length) else null end),
+   remaining_days: (if $good and ($rv | type) == "number" then $rv else null end)}
+'
+
+cmd_keyinfo() {
+  local call got match out verdict
+  call="$(call_json "$P_KEYINFO" "accessKey=${_cred_key}")"
+  got="$("$JQ" -r '(.body | objects | (.accessKey // .apikey // .apiKey // "")) | tostring' <<<"$call" 2>/dev/null)"
+  # The reply must name THIS key: compared in bash so the key never becomes a jq argument.
+  if [[ -z $got ]]; then match=null
+  elif [[ $got == "$_cred_key" ]]; then match=true
+  else match=false; fi
+  out="$(printf '%s\n' "$call" | "$JQ" -c \
+    --argjson allow "$ALLOW_SCOPES" --argjson need "$REQUIRED_SCOPES" --argjson match "$match" "$KEYINFO_JQ")"
+  printf '%s\n' "$out"
+  verdict="$("$JQ" -r '.verdict' <<<"$out" 2>/dev/null)"
+  case "$verdict" in
+    allow) return 0 ;;
+    deny) printf 'mexc-read: keyinfo verdict=deny (permission codes are in the output)\n' >&2; return 5 ;;
+    *) printf 'mexc-read: keyinfo verdict=error (permissions could not be established)\n' >&2; return 3 ;;
+  esac
+}
+
+# check_line <ENV NAME>: two booleans, returns 1 when not ok.
+check_line() {
+  local st
+  st="$(env_state "$1")"
+  case "$st" in
+    ok) printf '%s present: yes\n%s safe: yes\n' "$1" "$1" ;;
+    missing) printf '%s present: no\n%s safe: no\n' "$1" "$1"; return 1 ;;
+    *) printf '%s present: yes\n%s safe: no\n' "$1" "$1"; return 1 ;;
+  esac
+}
+
+cmd_check() {
+  local ok=0 sig=''
+  check_line MEXC_API_KEY || ok=2
+  check_line MEXC_API_SECRET || ok=2
+  if [[ $(env_state MEXC_API_SECRET) == ok ]]; then
+    _cred_secret="$MEXC_API_SECRET"
+    sig="$(mexc_sign 'check' 2>/dev/null)"
+    _cred_secret=''
+  fi
+  if [[ -n $sig ]]; then printf 'signer runs: yes\n'; else printf 'signer runs: no\n'; ok=2; fi
+  if [[ -x $JQ ]]; then printf 'jq available: yes\n'; else printf 'jq available: no\n'; ok=2; fi
+  return "$ok"
+}
+
+main() {
+  [[ $# -eq 1 ]] || usage
+  case "$1" in
+    check) cmd_check ;;
+    accounts) load_creds; cmd_accounts ;;
+    wallet) load_creds; cmd_wallet ;;
+    futures) load_creds; cmd_futures ;;
+    keyinfo) load_creds; cmd_keyinfo ;;
+    *) usage ;;
+  esac
+}
+
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  main "$@"
+fi
