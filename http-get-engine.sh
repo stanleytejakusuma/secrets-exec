@@ -96,6 +96,8 @@ esac
 
 allowed=0
 for pat in "${ALLOW[@]}"; do
+  # Expand the trusted allowlist entry as a glob, not a literal string.
+  # shellcheck disable=SC2254
   case "$path" in
     $pat) allowed=1; break ;;
   esac

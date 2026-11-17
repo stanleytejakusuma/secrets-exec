@@ -4,6 +4,8 @@ Run a named, allowlisted consumer with credentials injected into its environment
 without returning the credential values to the caller. Intended for automation and
 AI tools that need to **use** a credential without pasting it into a transcript.
 
+**Status:** Early release; reviewed, but not independently security-audited.
+
 **Leak reduction, not containment.** The engine, registry and consumers normally
 belong to the same OS user. A caller with that user's shell can edit them or inspect
 process environments. This is not a sandbox, a vault, or a defense against a hostile
@@ -118,7 +120,8 @@ against current exchange documentation. Live API behavior is not verified by the
 offline tests. API changes may require review before use.
 
 Read [adding a consumer](docs/adding-a-consumer.md),
-[security reporting](SECURITY.md), and [future directions](docs/roadmap.md).
+[AI-agent integration](docs/ai-agents.md), [security reporting](SECURITY.md),
+[the changelog](CHANGELOG.md), and [future directions](docs/roadmap.md).
 
 ## Offline tests
 
