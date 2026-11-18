@@ -29,6 +29,14 @@ store, system utilities and consumer dependencies are trusted.
   recorded best-effort, and exit-status auditing is also best-effort. Audit creation
   uses `umask 077`; existing permissions are not repaired automatically. Records
   contain names, arguments and reasons, never deliberately the fetched values.
+  Every event carries a validated/generated call identifier. Exclusive advisory locks
+  serialize whole appends (util-linux flock, or isolated Python fcntl when absent);
+  lock failure prevents execution when the allow event cannot be recorded.
+- Opt-in first-line metadata names the resolved credential selection before fetch,
+  not proof of a successful fetch or consumer execution. Internal controls are cleared
+  before child programs start and reserved as credential destinations. The header is
+  unauthenticated same-user data, not an authorization assertion. See
+  [structured results](structured-results.md).
 - Example HTTP consumers pin destinations, use HTTPS and do not follow redirects.
   The shared engine rejects dot segments and single-encoded dot/slash/backslash
   path components. Curl reads secret headers from stdin with `-q` first to disable
@@ -52,7 +60,8 @@ store, system utilities and consumer dependencies are trusted.
 | Arbitrary header/token bytes in generic HTTP configuration | Trusted installation data is not comprehensively validated. Use simple single-line tokens and review header values. Exchange examples perform stricter credential validation. |
 | Upstream response echoes a credential or contains hostile text | Generic HTTP output is not universally redacted. Treat returned text as untrusted and account data as sensitive. |
 | Huge unknown-length HTTP response | Curl's max-filesize behavior varies with version and response framing. It is defense in depth, not a guaranteed streaming cap. |
-| Secrets supplied as caller arguments | Arguments and refusal reasons enter the audit; never put credentials there. |
+| Secrets supplied as caller arguments or correlation IDs | Arguments, refusal reasons and valid call IDs enter the audit; never put credentials there. |
+| Forged metadata or output as the same user | The header is unauthenticated; matching IDs catch mix-ups, not forgery. Selection metadata does not establish successful secret use. |
 | Missing audit exit/refusal line, or full disk | Pre-execution allow logging fails closed, but subsequent exit/refusal logging cannot be guaranteed. No log rotation is bundled. |
 | Exchange permission changes after keyinfo | The verdict is a point-in-time self-report. It does not prevent an owner or service from changing permissions. |
 
@@ -60,7 +69,8 @@ store, system utilities and consumer dependencies are trusted.
 
 Offline fixtures test callers controlling names, arguments and environment without
 editing installed policy. They also test fail-closed behavior for malformed rows,
-backend configuration and failed credential fetches. Native-loader checks only
+backend configuration and failed credential fetches. Metadata tests cover selection
+framing, control isolation and concurrent large audit records with both lock helpers. Native-loader checks only
 establish that later child programs are not instrumented by the supplied test
 library; they cannot protect the engine's pre-start loader.
 

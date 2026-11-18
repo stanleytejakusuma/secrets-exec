@@ -25,13 +25,21 @@ Bash privileged mode ignores imported shell options/functions. The engine pins P
 and HOME, scrubs known runtime hooks, proxies, TLS overrides and loader/interpreter
 variables, and creates files with `umask 077`. Ordinary variables are still inherited.
 The audit includes consumer, bundle/key names, arguments, outcome, exit status and
-`via=` invocation name, not fetched values. Never supply secrets as arguments:
-arguments and refusal reasons are logged.
+`via=` invocation name and a per-call `call_id`, not fetched values. Audit appends are
+locked to keep concurrent records intact. Never supply secrets as arguments or call
+IDs: arguments and refusal reasons are logged.
+
+Wrappers can opt into a first-line JSON header with `SECRETS_EXEC_METADATA=1` and an
+optional `SECRETS_EXEC_CALL_ID`. It names the resolved credential selection, **not**
+proof of a successful fetch; normal CLI stdout is unchanged without the flag. See
+[structured results](docs/structured-results.md) for parsing and trust limits.
 
 ## Requirements
 
 Runtime targets Linux with Bash, OpenSSH, GNU coreutils, awk, grep and sed at the
-standard system paths. HTTP examples require `/usr/bin/curl`; the exchange examples
+standard system paths and Linux kernel UUID support. Audit locking uses util-linux
+`/usr/bin/flock`, falling back to isolated `/usr/bin/python3` with stdlib `fcntl` if
+flock is absent. Opt-in JSON metadata also requires `/usr/bin/python3`. HTTP examples require `/usr/bin/curl`; the exchange examples
 also require `/usr/bin/jq`, `/usr/bin/python3` with its standard library, and GNU date.
 macOS and nonstandard layouts are not fully tested. Use the executable engine as
 installed; **do not run it with `bash bin/secrets-exec`**, which bypasses its `-p`
@@ -150,7 +158,8 @@ No key store, credentials or network required. Tests copy the engines into tempo
 homes and replace SSH/curl with local stubs before running them. Suites cover
 refusals, environment/name hardening, HTTP traversal and time/size configuration,
 backend parsing, single-key/glob/multi-key execution, stdin preservation and audit
-behavior, forced-command parsing/private-file refusals and engine integration,
+behavior, metadata framing/control isolation, reference parsing and concurrent locked
+audit writes, forced-command parsing/private-file refusals and engine integration,
 and dry-run/apply/backup installer behavior. Installer tests use a fixture test
 runner to avoid recursively invoking themselves; the root guard is also exercised
 with an in-process uid stub, without sudo. A key-host ownership refusal similarly

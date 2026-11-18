@@ -8,4 +8,8 @@ for test in test_refusals.sh test_environment.sh test_http_engine.sh test_backen
   printf '\n== %s ==\n' "$test"
   bash "$HERE/$test"
 done
+for test in test_metadata.py test_result_parser.py; do
+  printf '\n== %s ==\n' "$test"
+  /usr/bin/python3 -I -S -B "$HERE/$test"
+done
 printf '\nAll offline suites passed.\n'

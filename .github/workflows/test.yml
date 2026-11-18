@@ -20,7 +20,7 @@ jobs:
         shell: bash
         run: |
           shopt -s nullglob
-          files=(bin/secrets-exec http-get-engine.sh examples/consumers.d/* tests/*.sh scripts/*.sh examples/keyhost/*)
+          files=(bin/secrets-exec http-get-engine.sh examples/consumers.d/* tests/*.sh scripts/*.sh examples/keyhost/secrets-exec-keyhost)
           shellcheck -S warning "${files[@]}"
 
   tests:
