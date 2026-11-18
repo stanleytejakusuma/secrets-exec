@@ -80,6 +80,8 @@ case "$path" in
   *[[:space:]]*) refuse "'$path' contains whitespace" ;;
 esac
 # Regex in a variable: bash 3.2 (macOS) cannot parse `&` inside an unquoted `[[ =~ ]]`.
+# Ranges like [A-Za-z] follow the locale (some UTF-8 locales also match 'é'): check in C.
+LC_ALL=C
 path_re='^/[A-Za-z0-9._~/?=&%+-]*$'
 [[ "$path" =~ $path_re ]] \
   || refuse "'$path' contains characters outside the permitted set"
