@@ -37,21 +37,32 @@ macOS and nonstandard layouts are not fully tested. Use the executable engine as
 installed; **do not run it with `bash bin/secrets-exec`**, which bypasses its `-p`
 shebang protection, and do not enable shell tracing around credential use.
 
-## Install by hand
+## Install
 
-Review the source and examples first. Nothing is installed automatically. From this
-source directory, copy files into the layout below (no remote calls occur here):
+Review the source and examples first. The [home-only installer](scripts/install.sh)
+runs all offline tests before installing; it needs no sudo or network and refuses
+root. From this source directory, preview changes and then explicitly apply them:
 
 ```sh
-install -d -m 0700 "$HOME/bin" "$HOME/.config/secrets-exec" \
-  "$HOME/.config/secrets-exec/consumers.d" "$HOME/.config/secrets-exec/http-consumers"
-install -m 0755 bin/secrets-exec "$HOME/bin/secrets-exec"
-install -m 0755 http-get-engine.sh "$HOME/.config/secrets-exec/http-get-engine.sh"
-install -m 0755 examples/consumers.d/* "$HOME/.config/secrets-exec/consumers.d/"
-install -m 0600 examples/http-consumers/github-read.conf "$HOME/.config/secrets-exec/http-consumers/github-read.conf"
-install -m 0600 examples/consumers.example.conf "$HOME/.config/secrets-exec/consumers.conf"
-install -m 0600 examples/backend.example.conf "$HOME/.config/secrets-exec/backend.conf"
+./scripts/install.sh
+./scripts/install.sh --apply
 ```
+
+The default is a **dry run**, including diffs for existing managed files. Apply
+installs `~/bin/secrets-exec` and the HTTP engine/consumer examples under
+`~/.config/secrets-exec/`, with private configuration directories. Replaced files
+are first backed up in `~/.config/secrets-exec/backup-<timestamp>/` (timestamps use
+Asia/Jakarta, UTC+7). Repeated applies leave identical files unchanged. Existing
+`consumers.conf` and `backend.conf` are **never overwritten**; absent ones are
+created from examples with mode 0600. Backups can contain private configuration:
+protect and prune them deliberately. The installer uses HOME as its destination;
+it has no alternate source, test bypass, or system-wide installation mode.
+
+To install **by hand**, copy `bin/secrets-exec` to `~/bin/` and
+`http-get-engine.sh` plus `examples/consumers.d/` and `examples/http-consumers/`
+under `~/.config/secrets-exec/`. Use 0755 for executable files, 0700 for tool
+directories, and 0600 for configuration files. Copy the two example configuration
+files to `consumers.conf` and `backend.conf` only if they do not already exist.
 
 Edit `consumers.conf`: replace `/home/you` with your absolute home path, choose your
 own bundle/key names, and **remove every row you do not intend to authorize**. These
@@ -72,8 +83,12 @@ until you have reviewed the chosen consumer's entire behavior.
 
 ## Backend protocol
 
-The backend is **not bundled**. Supply an SSH destination running commands that can
-read your chosen key store. The example is:
+Supply an SSH destination running commands that can read your chosen key store.
+A [restricted key-host reference and setup guide](examples/keyhost/README.md) is
+included for a private file store on a separate machine. It accepts only strict
+`get`/`list` requests and enforces a per-client bundle allowlist through an SSH
+forced command. It is not deployed by the local installer. Other backends can
+implement the same protocol. The generic example is:
 
 ```ini
 host=keyhost.example
@@ -98,8 +113,10 @@ Use a dedicated restricted SSH identity, for example an `authorized_keys` forced
 command that independently parses and authorizes `SSH_ORIGINAL_COMMAND`, rejects
 unexpected input, disables forwarding/PTY access, and limits readable bundles/keys.
 The remote command must not be a general shell. The local template grammar alone
-is not remote access control. No SSH server or forced-command implementation is
-included here; adapting an existing trusted store is an installation responsibility.
+is not remote access control. The [key-host guide](examples/keyhost/README.md)
+includes `command="...",restrict` setup, matching backend templates, value rotation,
+and its security limits. Deploying an SSH server and reviewing the remote account
+remain installation responsibilities.
 
 ## Examples and extension
 
@@ -133,8 +150,12 @@ No key store, credentials or network required. Tests copy the engines into tempo
 homes and replace SSH/curl with local stubs before running them. Suites cover
 refusals, environment/name hardening, HTTP traversal and time/size configuration,
 backend parsing, single-key/glob/multi-key execution, stdin preservation and audit
-behavior. The optional native-loader test compiles a local library when GCC is
-available; otherwise that individual check reports `SKIP`.
+behavior, forced-command parsing/private-file refusals and engine integration,
+and dry-run/apply/backup installer behavior. Installer tests use a fixture test
+runner to avoid recursively invoking themselves; the root guard is also exercised
+with an in-process uid stub, without sudo. A key-host ownership refusal similarly
+uses simulated stat metadata. The optional native-loader test compiles a local
+library when GCC is available; otherwise that individual check reports `SKIP`.
 
 ## Limitations
 
@@ -146,8 +167,10 @@ may survive the scrub list. HTTP path globs are not semantic authorization and d
 not cover every service's decoding behavior. The HTTP engine trusts installed
 headers and token shape; it is not a general sanitizer for arbitrary credentials or
 upstream bodies. Some responses may echo inputs. Curl byte limits are version- and
-response-dependent, not a universal streaming bound. Audit rotation, leases,
-revocation, remote authorization and a separate security principal are not provided.
+response-dependent, not a universal streaming bound. Audit rotation, leases and
+revocation are not provided. The local wrapper has no separate security principal;
+the optional key-host reference provides remote bundle authorization only when
+correctly deployed on a separate host with a restricted SSH identity.
 
 ## License
 
