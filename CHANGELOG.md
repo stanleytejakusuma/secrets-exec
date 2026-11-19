@@ -5,6 +5,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+No changes yet.
+
+## [0.2.0] - 2026-11-19
+
 ### Added
 
 - `scripts/quickstart.sh`: a two-minute local trial in one throwaway directory, with a
