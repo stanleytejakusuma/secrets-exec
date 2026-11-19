@@ -52,7 +52,7 @@ else:
         fake.chmod(0o700)
         source = (ROOT / "bin/secrets-exec").read_text()
         needle = "ssh -n -o BatchMode=yes"
-        self.assertEqual(source.count(needle), 3, "all transport sites must be stubbed")
+        self.assertEqual(source.count(needle), 1, "the single transport site must be stubbed")
         source = source.replace(needle, shlex.quote(str(fake)) + " -n -o BatchMode=yes")
         self.assertNotIn(needle, source)
         self.engine = self.home / "bin/secrets-exec"

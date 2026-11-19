@@ -53,8 +53,9 @@ See `reserved_env` in the engine for the actual list.
 7. Test success, every refusal branch, failed/empty fetches, output leakage, fixed
    destination/method, injection characters and size/page/time limits using local
    stubs. The examples' offline suite is not a test of a new consumer's live API.
-8. Run `bash tests/run-all.sh`, review the diff, then manually install the script
-   and its row using the README layout. Keep directories 0700 and config files 0600.
+8. Run `bash tests/run-all.sh`, review the diff, then install the script as
+   `~/.config/secrets-exec/consumers.d/<name>` (0755) and add its row to
+   `~/.config/secrets-exec/consumers.conf`. Keep directories 0700 and config files 0600.
 
 ## Shared GET-only HTTP engine
 

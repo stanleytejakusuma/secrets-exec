@@ -1,185 +1,135 @@
 # secrets-exec
 
-Run a named, allowlisted consumer with credentials injected into its environment,
-without returning the credential values to the caller. Intended for automation and
-AI tools that need to **use** a credential without pasting it into a transcript.
+**Let AI agents and scripts use your API tokens without ever seeing them.**
 
-**Status:** Early release; reviewed, but not independently security-audited.
+Your agent runs `secrets-exec github-read /user`. secrets-exec looks up `github-read` in a
+list you control, fetches the GitHub token, and runs the program you reviewed with the
+token in its environment. The agent gets that program's output. The token never enters
+the agent's context, its transcript, or your model provider's logs.
 
-**Leak reduction, not containment.** The engine, registry and consumers normally
-belong to the same OS user. A caller with that user's shell can edit them or inspect
-process environments. This is not a sandbox, a vault, or a defense against a hostile
-same-user process. See [the threat model](docs/threat-model.md).
+```text
+agent ── "github-read /user" ──▶ secrets-exec ── fetch ──▶ key store (another user or machine)
+                                     │
+                                     │  registry: github-read → GITHUB_TOKEN → reviewed program
+                                     ▼
+                         reviewed program (token in env) ──▶ GitHub API
+agent ◀──────────────── program output only ────────────┘
+```
 
-## How it works
+Linux only for now. MIT licensed. Plain Bash, no daemon, no service to run.
 
-1. The caller provides a consumer name and arguments, never a command or secret name.
-2. A local registry fixes the bundle, key name(s), injected environment name(s), and
-   absolute consumer command. Unknown names, unsafe rows and caller URLs fail closed.
-3. The engine fetches values over SSH using the installed `backend.conf`. Failed or
-   empty fetches stop the call; multi-key credentials are never partially injected.
-4. The engine writes an audit record, exports the values, starts the consumer as a
-   **child**, then records its exit status. Secret assignments are not put in argv.
-
-Bash privileged mode ignores imported shell options/functions. The engine pins PATH
-and HOME, scrubs known runtime hooks, proxies, TLS overrides and loader/interpreter
-variables, and creates files with `umask 077`. Ordinary variables are still inherited.
-The audit includes consumer, bundle/key names, arguments, outcome, exit status and
-`via=` invocation name and a per-call `call_id`, not fetched values. Audit appends are
-locked to keep concurrent records intact. Never supply secrets as arguments or call
-IDs: arguments and refusal reasons are logged.
-
-Wrappers can opt into a first-line JSON header with `SECRETS_EXEC_METADATA=1` and an
-optional `SECRETS_EXEC_CALL_ID`. It names the resolved credential selection, **not**
-proof of a successful fetch; normal CLI stdout is unchanged without the flag. See
-[structured results](docs/structured-results.md) for parsing and trust limits.
-
-## Requirements
-
-Runtime targets Linux with Bash, OpenSSH, GNU coreutils, awk, grep and sed at the
-standard system paths and Linux kernel UUID support. Audit locking uses util-linux
-`/usr/bin/flock`, falling back to isolated `/usr/bin/python3` with stdlib `fcntl` if
-flock is absent. Opt-in JSON metadata also requires `/usr/bin/python3`. HTTP examples require `/usr/bin/curl`; the exchange examples
-also require `/usr/bin/jq`, `/usr/bin/python3` with its standard library, and GNU date.
-macOS and nonstandard layouts are not fully tested. Use the executable engine as
-installed; **do not run it with `bash bin/secrets-exec`**, which bypasses its `-p`
-shebang protection, and do not enable shell tracing around credential use.
-
-## Install
-
-Review the source and examples first. The [home-only installer](scripts/install.sh)
-runs all offline tests before installing; it needs no sudo or network and refuses
-root. From this source directory, preview changes and then explicitly apply them:
+## Try it in 2 minutes
 
 ```sh
-./scripts/install.sh
-./scripts/install.sh --apply
+git clone https://github.com/stanleytejakusuma/secrets-exec
+cd secrets-exec
+./scripts/quickstart.sh
 ```
 
-The default is a **dry run**, including diffs for existing managed files. Apply
-installs `~/bin/secrets-exec` and the HTTP engine/consumer examples under
-`~/.config/secrets-exec/`, with private configuration directories. Replaced files
-are first backed up in `~/.config/secrets-exec/backup-<timestamp>/` (UTC
-timestamps). Repeated applies leave identical files unchanged. Existing
-`consumers.conf` and `backend.conf` are **never overwritten**; absent ones are
-created from examples with mode 0600. Backups can contain private configuration:
-protect and prune them deliberately. The installer uses HOME as its destination;
-it has no alternate source, test bypass, or system-wide installation mode.
+The trial builds a throwaway installation in one new temporary directory, with a fake
+token. It needs no sudo, network or SSH, and writes nothing anywhere else. You'll see:
 
-To install **by hand**, copy `bin/secrets-exec` to `~/bin/` and
-`http-get-engine.sh` plus `examples/consumers.d/` and `examples/http-consumers/`
-under `~/.config/secrets-exec/`. Use 0755 for executable files, 0700 for tool
-directories, and 0600 for configuration files. Copy the two example configuration
-files to `consumers.conf` and `backend.conf` only if they do not already exist.
+```text
+== 2. Run a consumer: it gets the token, the caller only gets its output
+$ secrets-exec demo
+demo-check: I received DEMO_TOKEN (37 characters) and used it. I never print it.
 
-Edit `consumers.conf`: replace `/home/you` with your absolute home path, choose your
-own bundle/key names, and **remove every row you do not intend to authorize**. These
-examples contain no credential values. Edit `backend.conf` to your reviewed backend.
-Do not add a general CLI simply because it accepts a token environment variable;
-many CLIs have flags or verbs that reveal the token or redirect requests.
+== 3. Anything not registered is refused
+$ secrets-exec /bin/sh -c id
+secrets-exec: invalid consumer name /bin/sh
 
-The engine expects to live at `<home>/bin/secrets-exec`; it derives
-`<home>/.config/secrets-exec/{consumers.conf,backend.conf,audit.log}` from its own
-location, not the caller's HOME. Keep configuration directories mode 0700, files
-0600, and reviewed programs executable. Avoid symlinking the engine from a different
-installation root: its invocation location determines configuration lookup.
-
-After configuring a real backend, `~/bin/secrets-exec --list` lists names only.
-`~/bin/secrets-exec github-read /user` makes an authenticated GitHub GET request;
-it returns account data, not a token. Do not use live credentials to test installation
-until you have reviewed the chosen consumer's entire behavior.
-
-## Backend protocol
-
-Supply an SSH destination running commands that can read your chosen key store.
-A [restricted key-host reference and setup guide](examples/keyhost/README.md) is
-included for a private file store on a separate machine. It accepts only strict
-`get`/`list` requests and enforces a per-client bundle allowlist through an SSH
-forced command. It is not deployed by the local installer. Other backends can
-implement the same protocol. The generic example is:
-
-```ini
-host=keyhost.example
-get=kv-get {bundle} {key}
-list=kv-list {bundle}
+== 5. Was the token in anything you just saw?
+No. It was in the consumer's environment only.
 ```
 
-- `host` is a hostname, SSH config alias or `user@host`, not an SSH option. Configure
-  identity and known-host verification in SSH configuration; do not disable it.
-- `get` prints one nonempty value on stdout and exits zero. Errors/diagnostics belong
-  on stderr with a nonzero exit status. No JSON envelope or success banner.
-- `list` prints key **names**, one per line; used only for single-key `*` patterns.
-  Names must look like shell identifiers. Zero or multiple matches refuse the call.
-- The engine replaces `{bundle}` and `{key}` with validated, single-quoted names.
-  Templates are plain words using letters, digits, `_ . / ~ { } -` and spaces;
-  shell quotes, substitutions and metacharacters are refused. These are command
-  templates, not executable local configuration: files are parsed, never sourced.
-- SSH is noninteractive (`BatchMode=yes`), uses `-n` to preserve consumer stdin, and
-  has connection timeouts. There is no overall timeout for a stalled remote command.
+## What it protects, and what it doesn't
 
-Use a dedicated restricted SSH identity, for example an `authorized_keys` forced
-command that independently parses and authorizes `SSH_ORIGINAL_COMMAND`, rejects
-unexpected input, disables forwarding/PTY access, and limits readable bundles/keys.
-The remote command must not be a general shell. The local template grammar alone
-is not remote access control. The [key-host guide](examples/keyhost/README.md)
-includes `command="...",restrict` setup, matching backend templates, value rotation,
-and its security limits. Deploying an SSH server and reviewing the remote account
-remain installation responsibilities.
+| Protected | Not protected |
+| --- | --- |
+| The token stays out of the agent's context, transcript and provider logs | Anything already running as the agent's OS user can read process memory and environments |
+| The agent can only run programs you registered, not "any command with the token" | A registered program that prints its token, or a buggy one |
+| Caller URLs, shells and interpreters are refused; destinations are fixed per program | Secrets the agent puts in arguments (arguments are logged) |
+| Common environment tricks (proxy, CA bundle, loader and shell hooks) are stripped | Every possible environment hook (the scrub list is finite) |
+| Every call and refusal is audited: names and arguments, never values | Audit rotation, leases or revocation (not built in) |
 
-## Examples and extension
+To keep the token store itself out of the agent's reach, put it under another OS user or
+another machine ([backends](docs/backends.md)). Details: [threat model](docs/threat-model.md).
 
-- `github-read`: shared GET-only header-auth engine; fixed GitHub host and configured
-  path allowlist. It accepts a path, not a URL. Scope the token and allowlist narrowly.
-- `bitget-read` and `mexc-read`: closed read-only verbs, fixed public exchange endpoints,
-  HMAC signing through Python's standard library, credentials through environment and
-  curl stdin (not argv). Use read-only exchange keys with withdrawals/trading disabled.
-- `demo`: `/usr/bin/true`; demonstrates a single-key row without printing the value.
+## Why not `op run`, Doppler, `aws-vault` or a `.env` file?
 
-Exchange JSON schema tags use an `example.bitget` or `example.mexc` prefix. Outputs
-can include sensitive balances, positions and wallet metadata; these are not
-anonymization tools. `keyinfo` has `allow`, `deny` and `error` verdicts; it is an
-exchange self-report, not proof of an immutable permission boundary. `check` is a
-network-free credential-shape/signer check when invoked directly; using it through
-the engine still fetches credentials over SSH first. Review every permission code
-against current exchange documentation. Live API behavior is not verified by the
-offline tests. API changes may require review before use.
+Those tools inject a secret into **whatever command you name**. That's right for you at a
+terminal. For an agent, it means `op run -- env` or `doppler run -- printenv` hands it
+the raw token.
 
-Read [adding a consumer](docs/adding-a-consumer.md),
-[AI-agent integration](docs/ai-agents.md), [security reporting](SECURITY.md),
-[the changelog](CHANGELOG.md), and [future directions](docs/roadmap.md).
+secrets-exec has no "run this command with the token" mode. The caller picks a name from
+a short list; you decide in advance which program runs, with which token, against which
+destination. Use the others for your own shell, and secrets-exec for what agents and
+unattended scripts may touch.
 
-## Offline tests
+## Real setup
 
-```sh
-bash tests/run-all.sh
-```
+1. **Install** (no sudo; dry run first, then apply):
+   ```sh
+   ./scripts/install.sh
+   ./scripts/install.sh --apply
+   ```
+   This puts `secrets-exec` in `~/bin` and examples under `~/.config/secrets-exec/`.
+   It never overwrites an existing `consumers.conf` or `backend.conf`.
+2. **Choose where tokens live** and fill in `backend.conf`: the same machine under a
+   separate user (one sudo rule), or a separate machine over SSH. Step-by-step:
+   [docs/backends.md](docs/backends.md).
+3. **Register programs** in `consumers.conf`. Every example row starts commented out;
+   uncomment only what you've reviewed. The GitHub reader's program is already
+   installed: uncomment its row and store a read-only token. Writing your own:
+   [adding a consumer](docs/adding-a-consumer.md).
+4. **Give your agent only `secrets-exec`.** Tell it never to put secrets in arguments,
+   and deny it direct access to the store. Checklist and example agent rules:
+   [AI-agent setup](docs/ai-agents.md).
 
-No key store, credentials or network required. Tests copy the engines into temporary
-homes and replace SSH/curl with local stubs before running them. Suites cover
-refusals, environment/name hardening, HTTP traversal and time/size configuration,
-backend parsing, single-key/glob/multi-key execution, stdin preservation and audit
-behavior, metadata framing/control isolation, reference parsing and concurrent locked
-audit writes, forced-command parsing/private-file refusals and engine integration,
-and dry-run/apply/backup installer behavior. Installer tests use a fixture test
-runner to avoid recursively invoking themselves; the root guard is also exercised
-with an in-process uid stub, without sudo. A key-host ownership refusal similarly
-uses simulated stat metadata. The optional native-loader test compiles a local
-library when GCC is available; otherwise that individual check reports `SKIP`.
+Check it: `~/bin/secrets-exec --list` shows what's registered (names, never values).
+`~/bin/secrets-exec github-read /user` returns your GitHub account, not the token.
 
-## Limitations
+**Requirements:** Linux with Bash, GNU coreutils, awk, grep and sed;
+`/usr/bin/flock` or `/usr/bin/python3` for audit locking; OpenSSH for the SSH backend;
+`/usr/bin/curl` for the HTTP examples. The engine reads its configuration from
+`<home>/.config/secrets-exec/`, where `<home>` is the parent of the `bin/` it is installed
+in, never from the caller's environment. Run it directly, never as
+`bash bin/secrets-exec`: that skips the protections in its `#!/bin/bash -p` line.
 
-Same-user code execution defeats the wrapper. Fetched values remain in process
-memory/environments and may be observable through process inspection, crash dumps,
-consumer output or dependencies. Consumers are trusted code; filename blocking and
-argument guards are only secondary mistake prevention. Unknown environment hooks
-may survive the scrub list. HTTP path globs are not semantic authorization and do
-not cover every service's decoding behavior. The HTTP engine trusts installed
-headers and token shape; it is not a general sanitizer for arbitrary credentials or
-upstream bodies. Some responses may echo inputs. Curl byte limits are version- and
-response-dependent, not a universal streaming bound. Audit rotation, leases and
-revocation are not provided. The local wrapper has no separate security principal;
-the optional key-host reference provides remote bundle authorization only when
-correctly deployed on a separate host with a restricted SSH identity.
+## Examples
+
+- `github-read`: GET-only GitHub API reader. It accepts an API path such as `/user`,
+  never a URL, and only paths on its allowlist. Built on a shared, header-auth HTTP
+  engine you can reuse for other APIs.
+- `scripts/quickstart.sh`: a trial consumer that proves it received a token without
+  printing it.
+- `examples/advanced/`: read-only crypto-exchange readers (HMAC-signed requests with
+  multi-part keys), for a more involved pattern. Not installed by default.
+- `examples/wrappers/parse_result.py`: reads the optional JSON header described in
+  [structured results](docs/structured-results.md).
+
+## Security
+
+- **Offline test suite** run in CI on every push: refusals, environment scrubbing,
+  HTTP path checks, backends, multi-key fetches, key host, installer, quick start.
+  Run it yourself with `bash tests/run-all.sh` (no credentials or network needed).
+- **Same-machine setup tested with real sudo** in a Debian container:
+  `bash tests/container-same-machine.sh`.
+- **Published [threat model](docs/threat-model.md)**, including what is out of scope.
+- **Independent reviews:** the code has had several independent AI-assisted security
+  reviews; their findings and fixes are listed in the [changelog](CHANGELOG.md).
+- **Report a vulnerability** privately: see [SECURITY.md](SECURITY.md).
+
+## Documentation
+
+[Backends](docs/backends.md) ·
+[AI-agent setup](docs/ai-agents.md) ·
+[Adding a consumer](docs/adding-a-consumer.md) ·
+[Threat model](docs/threat-model.md) ·
+[Structured results](docs/structured-results.md) ·
+[Key host](examples/keyhost/README.md) ·
+[Roadmap](docs/roadmap.md) ·
+[Changelog](CHANGELOG.md)
 
 ## License
 

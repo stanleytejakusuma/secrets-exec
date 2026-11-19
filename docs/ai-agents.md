@@ -100,4 +100,4 @@ modes, prompt instructions and command regexes cannot contain that agent.
 Use this pattern to reduce accidental disclosure and constrain normal tool calls.
 For hostile same-user execution, a separate security principal and independently
 enforced backend authorization are necessary. See [the threat model](threat-model.md)
-and [backend setup](../README.md#backend-protocol) before connecting real credentials.
+and [backend setup](backends.md) before connecting real credentials.

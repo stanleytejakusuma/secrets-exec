@@ -99,7 +99,45 @@ if [ "$rc" = 2 ] && nossh; then ok "wildcard row: interpreter refused before key
 run glob https://attacker.example
 if [ "$rc" = 2 ] && nossh; then ok "wildcard row: caller URL refused before key listing"; else ko "glob URL: rc=$rc ssh=$(cat "$T/ssh.log" 2>/dev/null)"; fi
 
-# 4. the engine source names no host or remote path of its own
+# 4. placeholders are whole words; no other braces (a remote shell would brace-expand them)
+bad_backend "placeholder inside a word" host=k 'get=/opt/kv/get x{bundle} {key}' "$L"
+bad_backend "brace expansion word"      host=k 'get=/opt/kv/get {a,b} {bundle} {key}' "$L"
+
+# 5. host=local runs a local helper directly: no ssh, no shell, names passed as separate argv
+cat > "$T/localhelper" <<EOF
+#!/bin/bash -p
+IFS='|'; builtin echo "\$*" >> "$T/local.log"
+IFS= read -r -t 1 line && builtin echo "stdin:\$line" >> "$T/local.log"
+case "\$1" in
+  get)  builtin printf '%s' "$SECRET" ;;
+  list) builtin echo TOKEN_A ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod 0755 "$T/localhelper"
+local_backend() { printf '%s\n' host=local "get=$T/localhelper get {bundle} {key}" \
+  "list=$T/localhelper list {bundle}" > "$B"; }
+lrun() { rm -f "$T/local.log"; run "$@"; }
+local_backend; lrun demo < <(echo piped-input)
+if [ "$rc" = 0 ] && [ "$(cat "$T/ran" 2>/dev/null)" = got-value ] && [ ! -e "$T/ssh.log" ] \
+   && [ "$(cat "$T/local.log" 2>/dev/null)" = "get|fixture-bundle|TOKEN_A" ]; then
+  ok "local backend: helper gets bare names as argv, no ssh, no stdin"
+else ko "local happy: rc=$rc out=$out log=$(cat "$T/local.log" 2>/dev/null)"; fi
+lrun glob
+if [ "$rc" = 0 ] && grep -qx "list|fixture-bundle" "$T/local.log" && [ ! -e "$T/ssh.log" ]; then
+  ok "local backend: key listing uses list template"
+else ko "local glob: rc=$rc log=$(cat "$T/local.log" 2>/dev/null)"; fi
+bad_local() { # bad_local <label> <lines...>
+  local label="$1"; shift; printf '%s\n' host=local "$@" > "$B"; lrun demo
+  if [ "$rc" = 2 ] && nossh && [ ! -e "$T/local.log" ]; then ok "$label refused"; else ko "$label: rc=$rc out=$out"; fi
+}
+LL="list=$T/localhelper list {bundle}"
+bad_local "local: relative helper"     'get=localhelper get {bundle} {key}' "$LL"
+bad_local "local: missing helper"      "get=$T/no-such-helper get {bundle} {key}" "$LL"
+bad_local "local: helper is a dir"     "get=$T get {bundle} {key}" "$LL"
+bad_local "local: list helper relative" "get=$T/localhelper get {bundle} {key}" 'list=localhelper list {bundle}'
+
+# 6. the engine source names no host or remote path of its own
 if ! grep -qE '^(REMOTE|SCRIPTS)="[^"]' "$ENGINE_FILE"; then ok "no hardcoded backend in the engine"
 else ko "engine still hardcodes a backend"; fi
 

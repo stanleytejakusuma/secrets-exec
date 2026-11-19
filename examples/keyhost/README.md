@@ -1,9 +1,12 @@
-# Restricted SSH key-host reference
+# Reference key host
 
 This Linux/Bash reference is the other end of `backend.conf`. It reads a private
-file store on a **separate machine**, not on the client running the consumers.
-It needs Bash, GNU coreutils, and `/proc` mounted. It does not need a vault service,
-network API, `pass`, or `age`.
+file store owned by a **separate principal**: another OS user on the same machine
+(reached with one pinned sudo rule) or another machine (reached with a restricted
+SSH key). For choosing between them and the same-machine setup, see
+[docs/backends.md](../../docs/backends.md); this guide covers the SSH setup and the
+key host's own rules. It needs Bash, GNU coreutils, and `/proc` mounted. It does not
+need a vault service, network API, `pass`, or `age`.
 
 ## Boundary and threat model
 
@@ -16,12 +19,17 @@ and no other unrestricted login method for that client. Disable password and
 keyboard-interactive login for this dedicated account as appropriate. Do not use
 a shared unrestricted SSH identity for the same account.
 
-The endpoint accepts **only** these exact strings in `SSH_ORIGINAL_COMMAND`:
+Over SSH, the endpoint accepts **only** these exact strings in `SSH_ORIGINAL_COMMAND`:
 
 ```text
 get 'bundle' 'KEY'
 list 'bundle'
 ```
+
+Locally (same machine, `host=local`), the same request arrives as arguments after the
+options: `secrets-exec-keyhost --store ... --allow ... get BUNDLE KEY` or `list BUNDLE`.
+It is rebuilt into the quoted form above and checked by the same parser. Arguments
+win over an inherited `SSH_ORIGINAL_COMMAND`.
 
 Names use letters, digits, underscores, dots and hyphens, but cannot start with a
 dot. Whitespace variations, newlines, extra arguments, shell syntax and client
@@ -59,7 +67,7 @@ not a complete security audit: malformed/unauthorized requests are not logged,
 and there is no log rotation or rate limiting. Existing logs must be private and
 owned by the account. Keep their parent directory private too.
 
-## Set up the key host
+## Set up the key host over SSH
 
 Review the script before installing it. On the **key host**, as the dedicated
 account (not root):

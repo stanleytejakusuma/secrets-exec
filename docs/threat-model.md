@@ -5,8 +5,13 @@
 The intended outcome is fewer accidental credential disclosures in tool output,
 conversation transcripts, command arguments and logs. This depends on trusted,
 reviewed consumers. It is not a security boundary against a process running as the
-installation owner. The installed files, local OS, SSH implementation, remote key
-store, system utilities and consumer dependencies are trusted.
+installation owner. The installed files, local OS, SSH or sudo implementation, key
+store and its account, system utilities and consumer dependencies are trusted.
+
+Keeping the store under a **separate principal** (another OS user via sudo, or
+another machine via SSH) narrows what a same-user process can reach to the bundles
+that principal allows: it can no longer read the whole store, but it can still
+fetch any allowed bundle by calling the backend directly.
 
 ## Controls implemented
 
@@ -22,7 +27,10 @@ store, system utilities and consumer dependencies are trusted.
   utilities run, HOME is pinned for the consumer, and known shell/loader/proxy/TLS/
   interpreter hooks are scrubbed from programs started by the engine. Ordinary
   environment variables remain, so consumer-specific hooks still need review.
-- Values travel from SSH stdout into shell variables, then into the consumer's
+- With `host=local`, backend templates run as a command without a shell: each word
+  is one argument, placeholders must be whole words and are replaced by one validated
+  name each, the helper must be an absolute executable path, and its stdin is closed.
+- Values travel from the backend's stdout into shell variables, then into the consumer's
   environment. Secret assignments do not appear in argv. Multi-key fetch failures
   and empty values stop execution before exporting a partial credential set.
 - An allow audit record must succeed before the consumer starts. Refusals are
@@ -54,7 +62,8 @@ store, system utilities and consumer dependencies are trusted.
 | Inject native code before the engine starts | A dynamic loader can run caller code before the script can scrub variables; equivalent to same-user code execution. |
 | A consumer or dependency prints credentials | The engine cannot generally distinguish secrets from legitimate output. Consumer review and least-privilege credentials are necessary. |
 | Unrecognized environment or configuration hooks | The scrub list is deliberately finite, not a clean-room environment. System/user configuration still matters. |
-| Malicious remote key store or SSH account | The backend supplies the values. SSH authentication is transport trust, not assurance that values or remote commands are safe. |
+| Malicious key store, key-store account or local helper | The backend supplies the values. SSH or sudo authentication is transport trust, not assurance that values or helper commands are safe. |
+| Same-user process calls the backend directly | With a separate principal it can fetch any **allowed** bundle (the sudo rule or SSH key is usable by that user), but not the rest of the store. Keep allowlists narrow. |
 | Stalled backend command | Connection timeouts exist; a remote command that never finishes has no overall deadline. |
 | Backend interprets double encoding or service-specific routes | Single-encoding traversal checks and globs do not model every server's URL semantics. Tight per-service paths are needed. |
 | Arbitrary header/token bytes in generic HTTP configuration | Trusted installation data is not comprehensively validated. Use simple single-line tokens and review header values. Exchange examples perform stricter credential validation. |
@@ -74,6 +83,11 @@ framing, control isolation and concurrent large audit records with both lock hel
 establish that later child programs are not instrumented by the supplied test
 library; they cannot protect the engine's pre-start loader.
 
-No live exchange authentication, remote store, end-to-end forced-command deployment,
-macOS compatibility, containment claim or exhaustive exfiltration proof is covered.
+The same-machine setup (separate store user, pinned sudo rule, `host=local`) was
+exercised end to end in a Debian container with real sudo:
+[`tests/container-same-machine.sh`](../tests/container-same-machine.sh). It needs
+Docker and network access, so it is not part of `tests/run-all.sh` or CI.
+
+No live exchange authentication, end-to-end SSH forced-command deployment, macOS
+compatibility, containment claim or exhaustive exfiltration proof is covered.
 See [the roadmap](roadmap.md) for prospective stronger boundaries.

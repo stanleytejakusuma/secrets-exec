@@ -126,6 +126,46 @@ cp -r "$T/store" "$T/home/.local/share/secrets-exec-keyhost/store"
 HOME="$T/home" SSH_ORIGINAL_COMMAND="get 'a' 'TOKEN'" "$KEYHOST" --allow a,other > "$T/out"
 cmp -s "$T/out" "$T/store/a/TOKEN"; ok 'default store and multiple allowed bundles'
 
+# Local request form: same parser, same allowlist and file checks; no SSH involved.
+lrun() { rc=0; env -u SSH_ORIGINAL_COMMAND "$KEYHOST" --store "$T/store" --allow a "$@" > "$T/out" 2> "$T/err" || rc=$?; }
+lreject() { local label="$1"; shift; lrun "$@"
+  [ "$rc" -ne 0 ] && [ ! -s "$T/out" ] || { echo "FAIL $label"; exit 1; }; ok "$label"; }
+lrun get a TOKEN
+[ "$rc" -eq 0 ] && cmp -s "$T/out" "$T/store/a/TOKEN" || { echo 'FAIL local get'; exit 1; }
+ok 'local get returns exact bytes'
+lrun list a
+[ "$rc" -eq 0 ] && [ "$(sort "$T/out")" = $'SECOND\nTOKEN' ] || { echo 'FAIL local list'; exit 1; }
+ok 'local list emits key names'
+lreject 'local: bundle not allowlisted' get other TOKEN
+lreject 'local: quote in name'           get "a' 'x" TOKEN
+lreject 'local: newline in name'         get $'a\nb' TOKEN
+lreject 'local: dotdot key'              get a ..
+lreject 'local: extra argument'          get a TOKEN extra
+lreject 'local: missing key'             get a
+lreject 'local: unknown verb'            cat a
+lreject 'local: option after request'    get a TOKEN --store /elsewhere
+rc=0
+SSH_ORIGINAL_COMMAND="get 'other' 'TOKEN'" "$KEYHOST" --store "$T/store" --allow a get a TOKEN > "$T/out" 2> "$T/err" || rc=$?
+[ "$rc" -eq 0 ] && cmp -s "$T/out" "$T/store/a/TOKEN" || { echo 'FAIL local precedence'; exit 1; }
+ok 'local arguments, not an inherited SSH_ORIGINAL_COMMAND, select the request'
+
+# Real local engine -> host=local -> unmodified key host -> reviewed fixture. No SSH.
+mkdir -p "$T/local/bin" "$T/local/.config/secrets-exec"
+cp "$REPO/bin/secrets-exec" "$T/local/bin/secrets-exec"
+printf '#!/bin/bash -p\n[ "$DEMO_TOKEN" = fixture-value ] && printf received > %q\n' "$T/received" > "$T/local-consumer"
+chmod 0755 "$T/local/bin/secrets-exec" "$T/local-consumer"
+printf 'demo|a|TOKEN|DEMO_TOKEN|%s|\nglob|a|TOK*|DEMO_TOKEN|%s|\n' "$T/local-consumer" "$T/local-consumer" > "$T/local/.config/secrets-exec/consumers.conf"
+printf '%s\n' host=local "get=$KEYHOST --store $T/store --allow a,other get {bundle} {key}" \
+  "list=$KEYHOST --store $T/store --allow a list {bundle}" > "$T/local/.config/secrets-exec/backend.conf"
+PATH="$T/no-ssh:/usr/bin:/bin" "$T/local/bin/secrets-exec" demo > "$T/out" 2> "$T/err"
+[ "$(< "$T/received")" = received ] && [ ! -s "$T/out" ] && [ ! -s "$T/err" ] || { echo 'FAIL local engine'; cat "$T/err"; exit 1; }
+ok 'engine host=local: consumer receives value from the key host, no SSH'
+rm "$T/received"
+"$T/local/bin/secrets-exec" glob > "$T/out" 2> "$T/err"
+[ "$(< "$T/received")" = received ] || { echo 'FAIL local glob'; exit 1; }
+ok 'engine host=local resolves a glob through the key host list'
+rm "$T/received"
+
 # Real local engine -> fake SSH -> unmodified forced command -> reviewed fixture.
 mkdir -p "$T/client/bin" "$T/client/.config/secrets-exec"
 cp "$REPO/bin/secrets-exec" "$T/client/bin/secrets-exec"

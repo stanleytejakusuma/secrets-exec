@@ -5,7 +5,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-No changes yet.
+### Added
+
+- `scripts/quickstart.sh`: a two-minute local trial in one throwaway directory, with a
+  fake token. No sudo, network or SSH; nothing written outside that directory.
+- `host=local` in `backend.conf`: run the `get`/`list` helper on this machine without a
+  shell, so the store can live under a separate OS user reached through one pinned sudo
+  rule. Step-by-step setup in `docs/backends.md`.
+- The reference key host also accepts a local request (`get BUNDLE KEY` /
+  `list BUNDLE` after its options), checked by the same parser as SSH requests.
+- `tests/container-same-machine.sh`: the same-machine setup end to end with real sudo in
+  a Debian container (needs Docker; not part of CI).
+
+### Changed
+
+- Backend template placeholders must be whole words, and no other word may contain a
+  brace. Commas are now allowed in templates (for `--allow a,b`).
+- README rewritten around what the tool does for you, a quick start and a comparison
+  with `op run`/Doppler/`aws-vault`. Backend details moved to `docs/backends.md`.
+- Every row in `examples/consumers.example.conf` and `examples/backend.example.conf` is
+  commented out, so nothing is authorized until you choose it.
+- Exchange examples moved to `examples/advanced/` and are no longer installed by default.
 
 ## [0.1.1] - 2026-11-19
 
