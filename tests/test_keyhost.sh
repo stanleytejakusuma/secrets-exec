@@ -149,6 +149,22 @@ SSH_ORIGINAL_COMMAND="get 'other' 'TOKEN'" "$KEYHOST" --store "$T/store" --allow
 [ "$rc" -eq 0 ] && cmp -s "$T/out" "$T/store/a/TOKEN" || { echo 'FAIL local precedence'; exit 1; }
 ok 'local arguments, not an inherited SSH_ORIGINAL_COMMAND, select the request'
 
+# A sudo rule matches arguments as one space-joined string, so option values must not be able
+# to carry spaces, and no option may be repeated: otherwise a crafted argument list can match
+# "<keyhost> --store S --allow a get *" while the key host sees another --allow.
+orun() { rc=0; env -u SSH_ORIGINAL_COMMAND "$KEYHOST" "$@" > "$T/out" 2> "$T/err" || rc=$?; }
+oreject() { local label="$1"; shift; orun "$@"
+  [ "$rc" -ne 0 ] && [ ! -s "$T/out" ] || { echo "FAIL $label"; exit 1; }; ok "$label"; }
+printf 'other-value' > "$T/store/other/TOKEN"
+oreject 'sudo-joined bypass: space in --store value, repeated --store' \
+  --store "$T/store --allow a get x" --store "$T/store" --allow other get other TOKEN
+oreject 'repeated --store'        --store "$T/store" --store "$T/store" --allow a get a TOKEN
+oreject 'repeated --log'          --store "$T/store" --allow a --log "$T/l1" --log "$T/l2" get a TOKEN
+oreject 'tab in option value'     --store "$T/store"$'\t' --allow a get a TOKEN
+oreject 'newline in option value' --store "$T/store" --allow $'a\nother' get a TOKEN
+oreject 'empty option value'      --store '' --allow a get a TOKEN
+rm "$T/store/other/TOKEN"
+
 # Real local engine -> host=local -> unmodified key host -> reviewed fixture. No SSH.
 mkdir -p "$T/local/bin" "$T/local/.config/secrets-exec"
 cp "$REPO/bin/secrets-exec" "$T/local/bin/secrets-exec"

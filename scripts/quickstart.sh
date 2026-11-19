@@ -16,7 +16,8 @@ die() { printf 'quickstart: %s\n' "$1" >&2; exit 1; }
 
 if [ "$#" -gt 1 ]; then die 'usage: quickstart.sh [new-directory]'; fi
 plain() { # backend.conf templates are plain words, so the trial path must be too
-  [[ "$1" =~ ^/[A-Za-z0-9_./-]+$ ]] || die "path '$1' has characters backend.conf cannot hold; pick a simpler one"
+  [[ "$1" =~ ^/[A-Za-z0-9_./-]+$ ]] \
+    || die "path '$1' must use only letters, digits and _ . / - ; pass a simpler directory, e.g. ./scripts/quickstart.sh ~/se-trial"
 }
 if [ "$#" -eq 1 ]; then
   [ ! -e "$1" ] && [ ! -L "$1" ] || die "$1 already exists; choose a new directory"
@@ -74,7 +75,7 @@ printf '\n== 4. Every call is audited: names and arguments, never values\n'
 tee -a "$seen" < "$C/audit.log"
 
 printf '\n== 5. Was the token in anything you just saw?\n'
-if grep -qF "$token" "$seen" "$C/audit.log"; then
+if grep -qFf "$D/keyhost/store/demo/DEMO_TOKEN" "$seen" "$C/audit.log"; then
   die 'the token appeared in the output; please report this as a bug'
 fi
 printf 'No. It was in the consumer'"'"'s environment only.\n'
@@ -86,6 +87,7 @@ Try it yourself:   $SE demo
 See the setup:     $C/
 Remove the trial:  rm -rf $D
 
-This trial keeps its store under your own user, which is fine for trying it, not for
-real credentials. For real use, see "Real setup" in the README.
+This trial keeps its store under your own user: anything running as you could read
+$D/keyhost/store directly. Fine for trying it, not for real credentials.
+For real use, see "Real setup" in the README and docs/backends.md.
 EOF

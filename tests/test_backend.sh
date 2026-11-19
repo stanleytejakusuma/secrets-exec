@@ -127,6 +127,26 @@ lrun glob
 if [ "$rc" = 0 ] && grep -qx "list|fixture-bundle" "$T/local.log" && [ ! -e "$T/ssh.log" ]; then
   ok "local backend: key listing uses list template"
 else ko "local glob: rc=$rc log=$(cat "$T/local.log" 2>/dev/null)"; fi
+# The local helper starts with a minimal environment, not the caller's.
+cat > "$T/envhelper" <<EOF
+#!/bin/bash -p
+/usr/bin/env > "$T/helper-env"
+builtin printf '%s' "$SECRET"
+EOF
+chmod 0755 "$T/envhelper"
+printf '%s\n' host=local "get=$T/envhelper {bundle} {key}" "list=$T/envhelper {bundle}" > "$B"
+rm -f "$T/helper-env"
+rm -f "$T/ran"; out="$(VAULT_ADDR=x GNUPGHOME=/evil PASSWORD_STORE_DIR=/evil "$VE" demo 2>&1)"; rc=$?
+if [ "$rc" = 0 ] && ! grep -qE '^(VAULT_ADDR|GNUPGHOME|PASSWORD_STORE_DIR)=' "$T/helper-env" \
+   && grep -qx "HOME=$T" "$T/helper-env" && grep -qx 'PATH=/usr/bin:/bin' "$T/helper-env"; then
+  ok "local backend: helper gets a minimal environment, HOME pinned"
+else ko "local env: rc=$rc env=$(tr '\n' ' ' < "$T/helper-env" 2>/dev/null)"; fi
+# A name starting with '-' never reaches a local helper (it could be read as an option).
+printf 'dash|-bundle|TOKEN_A|DEMO_TOKEN|%s|\n' "$T/consumer" >> "$CONF"
+local_backend; lrun dash
+if [ "$rc" = 2 ] && [ ! -e "$T/local.log" ] && [ ! -e "$T/ran" ]; then ok "local backend: leading-dash name refused"
+else ko "dash name: rc=$rc log=$(cat "$T/local.log" 2>/dev/null)"; fi
+
 bad_local() { # bad_local <label> <lines...>
   local label="$1"; shift; printf '%s\n' host=local "$@" > "$B"; lrun demo
   if [ "$rc" = 2 ] && nossh && [ ! -e "$T/local.log" ]; then ok "$label refused"; else ko "$label: rc=$rc out=$out"; fi

@@ -1,11 +1,14 @@
 # secrets-exec
 
-**Let AI agents and scripts use your API tokens without ever seeing them.**
+**Let AI agents and scripts use your API tokens without putting them in the agent's context.**
 
 Your agent runs `secrets-exec github-read /user`. secrets-exec looks up `github-read` in a
 list you control, fetches the GitHub token, and runs the program you reviewed with the
-token in its environment. The agent gets that program's output. The token never enters
-the agent's context, its transcript, or your model provider's logs.
+token in its environment. The agent gets that program's output. In normal use the token
+never enters the agent's context, its transcript, or your model provider's logs.
+
+This is leak reduction, not a sandbox: it stops accidents and routine misuse, not a
+determined process running as the agent's own OS user (see the table below).
 
 ```text
 agent ── "github-read /user" ──▶ secrets-exec ── fetch ──▶ key store (another user or machine)
@@ -46,7 +49,8 @@ No. It was in the consumer's environment only.
 
 | Protected | Not protected |
 | --- | --- |
-| The token stays out of the agent's context, transcript and provider logs | Anything already running as the agent's OS user can read process memory and environments |
+| The token stays out of the agent's context, transcript and provider logs | An agent that runs the backend command itself (`sudo … secrets-exec-keyhost`, `ssh keyhost`) can print any **allowed** token: deny that command in its tool rules |
+| The store can live where the agent's user can't read it | Anything running as the agent's OS user can read process memory and environments |
 | The agent can only run programs you registered, not "any command with the token" | A registered program that prints its token, or a buggy one |
 | Caller URLs, shells and interpreters are refused; destinations are fixed per program | Secrets the agent puts in arguments (arguments are logged) |
 | Common environment tricks (proxy, CA bundle, loader and shell hooks) are stripped | Every possible environment hook (the scrub list is finite) |
@@ -63,8 +67,10 @@ the raw token.
 
 secrets-exec has no "run this command with the token" mode. The caller picks a name from
 a short list; you decide in advance which program runs, with which token, against which
-destination. Use the others for your own shell, and secrets-exec for what agents and
-unattended scripts may touch.
+destination. And because the agent never needs the backend command for its normal work,
+you can deny that one command in the agent's tool rules without breaking anything; you
+can't do that with `op run` when it's how the agent gets its work done. Use the others
+for your own shell, and secrets-exec for what agents and unattended scripts may touch.
 
 ## Real setup
 
@@ -113,7 +119,8 @@ in, never from the caller's environment. Run it directly, never as
 - **Offline test suite** run in CI on every push: refusals, environment scrubbing,
   HTTP path checks, backends, multi-key fetches, key host, installer, quick start.
   Run it yourself with `bash tests/run-all.sh` (no credentials or network needed).
-- **Same-machine setup tested with real sudo** in a Debian container:
+- **Same-machine setup tested with real sudo** in a Debian container on every CI run,
+  including a crafted-argument attempt to widen the allowlist:
   `bash tests/container-same-machine.sh`.
 - **Published [threat model](docs/threat-model.md)**, including what is out of scope.
 - **Independent reviews:** the code has had several independent AI-assisted security

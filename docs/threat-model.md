@@ -29,7 +29,11 @@ fetch any allowed bundle by calling the backend directly.
   environment variables remain, so consumer-specific hooks still need review.
 - With `host=local`, backend templates run as a command without a shell: each word
   is one argument, placeholders must be whole words and are replaced by one validated
-  name each, the helper must be an absolute executable path, and its stdin is closed.
+  name each, the helper must be an absolute executable path, its stdin is closed, it
+  starts with a minimal environment (fixed PATH, installation HOME, `LC_ALL=C`), and
+  names starting with `-` are refused.
+- The reference key host refuses repeated options and option values containing
+  whitespace, so its arguments and a sudo rule's space-joined match always agree.
 - Values travel from the backend's stdout into shell variables, then into the consumer's
   environment. Secret assignments do not appear in argv. Multi-key fetch failures
   and empty values stop execution before exporting a partial credential set.
@@ -85,8 +89,9 @@ library; they cannot protect the engine's pre-start loader.
 
 The same-machine setup (separate store user, pinned sudo rule, `host=local`) was
 exercised end to end in a Debian container with real sudo:
-[`tests/container-same-machine.sh`](../tests/container-same-machine.sh). It needs
-Docker and network access, so it is not part of `tests/run-all.sh` or CI.
+[`tests/container-same-machine.sh`](../tests/container-same-machine.sh), including a
+crafted argument list that matches the sudo rule as a joined string. It runs in CI; it
+needs Docker and network access, so it is not part of `tests/run-all.sh`.
 
 No live exchange authentication, end-to-end SSH forced-command deployment, macOS
 compatibility, containment claim or exhaustive exfiltration proof is covered.

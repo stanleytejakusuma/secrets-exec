@@ -59,10 +59,13 @@ and test them against the harness's actual matching rules:
 (^|[;&|[:space:]])(/usr/bin/)?ssh[[:space:]]+[^;&|]*keyhost[.]example([[:space:]]|$)
 (^|[;&|[:space:]])(/usr/bin/|/bin/)?cat[[:space:]]+[^;&|]*/var/lib/example-key-store(/|[[:space:]]|$)
 (^|[;&|[:space:]])(/opt/key-store/)?kv-(get|list)([[:space:]]|$)
+secrets-exec-keyhost
+(^|[;&|[:space:]])(/usr/bin/)?sudo[[:space:]]+[^;&|]*secrets-store
 ```
 
-These deny direct SSH to the example key host, `cat` of the example store, and
-running the example key-host reader/listing commands. Apply the hook to the agent's
+These deny direct SSH to the example key host, `cat` of the example store,
+running the example key-host reader/listing commands, and (for the same-machine
+setup) calling the key host or sudo-ing to the store account yourself. Apply the hook to the agent's
 tool requests, not the reviewed engine's internal SSH transport. Check that an
 approved `secrets-exec` request is still allowed.
 

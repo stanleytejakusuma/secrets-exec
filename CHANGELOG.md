@@ -19,8 +19,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
-- Backend template placeholders must be whole words, and no other word may contain a
-  brace. Commas are now allowed in templates (for `--allow a,b`).
+- **Possibly breaking:** backend template placeholders must be whole words, and no other
+  word may contain a brace, so templates like `get=kv-get secret/{bundle}/{key}` are now
+  refused. Commas are now allowed in templates (for `--allow a,b`).
+- **Possibly breaking:** `host=local` is now the local backend, so an SSH alias named
+  `local` can no longer be used as `host`.
+- **Possibly breaking:** the reference key host refuses repeated options and option values
+  containing whitespace. Without this, a sudo rule (which matches arguments as one
+  space-joined string) could be satisfied by crafted arguments that select another
+  allowlist. Found by an independent review of this release before it shipped.
+- Local backend helpers start with a minimal environment (fixed `PATH`, the installation
+  `HOME`, `LC_ALL=C`), and bundle/key names starting with `-` are refused for them.
 - README rewritten around what the tool does for you, a quick start and a comparison
   with `op run`/Doppler/`aws-vault`. Backend details moved to `docs/backends.md`.
 - Every row in `examples/consumers.example.conf` and `examples/backend.example.conf` is

@@ -21,6 +21,10 @@ Keep each allowlist to the bundles that user really needs.
 
 ## Option A: same machine, separate user
 
+Use this when the agent runs as an ordinary account **with no other sudo rights**. If
+the agent's account can already run anything as root, a sudo rule adds no separation:
+create a separate account for the agent first.
+
 Run as root once. Replace `you` with the account your agent runs as, and
 `example-code` with your bundle names (comma-separated for several).
 
@@ -32,13 +36,20 @@ install -m 0755 examples/keyhost/secrets-exec-keyhost /usr/local/bin/secrets-exe
 install -d -m 0700 -o secrets-store -g secrets-store \
   /var/lib/secrets-store/store /var/lib/secrets-store/store/example-code
 
-# 2. Let `you` run only that program, as that account, with these exact options
+# 2. Let `you` run only that program, as that account, with these exact options.
+#    Check the rule before installing it: a broken file in sudoers.d can break sudo.
 KH='/usr/local/bin/secrets-exec-keyhost --store /var/lib/secrets-store/store --allow example-code'
-printf 'you ALL=(secrets-store) NOPASSWD: %s get *, %s list *\n' "$KH" "$KH" \
-  > /etc/sudoers.d/secrets-exec
-chmod 0440 /etc/sudoers.d/secrets-exec
-visudo -cf /etc/sudoers.d/secrets-exec
+KS="${KH//,/\\,}"   # sudoers needs commas written as \, (only matters for several bundles)
+tmp="$(mktemp)"
+printf 'you ALL=(secrets-store) NOPASSWD:NOLOG_OUTPUT: %s get *, %s list *\n' "$KS" "$KS" > "$tmp"
+visudo -cf "$tmp" && install -m 0440 "$tmp" /etc/sudoers.d/secrets-exec
+rm -f "$tmp"
 ```
+
+`NOLOG_OUTPUT` keeps the token out of sudo's I/O log if output logging is enabled on
+your system. sudo matches the arguments as one space-joined string; the key host
+refuses repeated options and option values containing spaces, so a crafted argument
+list cannot match this rule while selecting another store or allowlist.
 
 Add a token without it touching shell history or arguments (as root):
 
@@ -58,11 +69,20 @@ get=/usr/bin/sudo -n -u secrets-store /usr/local/bin/secrets-exec-keyhost --stor
 list=/usr/bin/sudo -n -u secrets-store /usr/local/bin/secrets-exec-keyhost --store /var/lib/secrets-store/store --allow example-code list {bundle}
 ```
 
-The `--store` and `--allow` text must match the sudoers line exactly, or sudo refuses.
-The sudo rule fixes those options, so the agent's user cannot widen its own allowlist,
-pick another store, or run anything else as `secrets-store`; extra arguments after the
-request are refused by the key host. This whole flow, including those refusals, is
-checked in a Debian container by [`tests/container-same-machine.sh`](../tests/container-same-machine.sh).
+The `--store` and `--allow` text must match the sudoers line exactly (with plain commas
+here), or sudo refuses. The sudo rule fixes those options, so the agent's user cannot
+widen its own allowlist, pick another store, or run anything else as `secrets-store`.
+It **can** still run the key host for the allowed bundles itself, and print a value:
+block that command in your agent's tool rules ([AI-agent setup](ai-agents.md)).
+
+This whole flow, including those refusals and a crafted-argument bypass attempt, runs
+with real sudo in a Debian container in CI:
+[`tests/container-same-machine.sh`](../tests/container-same-machine.sh).
+
+If a call fails with only `backend rc=1`, run the `get` command from `backend.conf`
+yourself with a test bundle to see the key host's or sudo's error (secrets-exec
+discards backend error output, since it could contain a value). If sudo says it needs
+a terminal, your sudoers has `requiretty`; add `Defaults:you !requiretty`.
 
 ## Option B: separate machine over SSH
 
@@ -86,7 +106,10 @@ list=<command words with {bundle}>
 
 - `host=local` runs `get`/`list` on this machine **without a shell**: each word is one
   argument and `{bundle}`/`{key}` are replaced by one name each. The first word must be
-  an absolute path to an executable. The helper's stdin is closed.
+  an absolute path to an executable. The helper's stdin is closed, and it starts with
+  only `PATH=/usr/bin:/bin`, `HOME` (the installation home) and `LC_ALL=C`. Bundle and
+  key names starting with `-` are refused. (`local` is therefore not usable as an SSH
+  alias name.)
 - Any other `host` is an SSH destination: a hostname, `~/.ssh/config` alias or
   `user@host`, never an SSH option. The names are inserted single-quoted into the
   remote command. SSH runs non-interactively (`BatchMode=yes`, `-n`) with a connection
