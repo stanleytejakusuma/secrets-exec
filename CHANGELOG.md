@@ -19,7 +19,7 @@ No changes yet.
 - The reference key host also accepts a local request (`get BUNDLE KEY` /
   `list BUNDLE` after its options), checked by the same parser as SSH requests.
 - `tests/container-same-machine.sh`: the same-machine setup end to end with real sudo in
-  a Debian container (needs Docker; not part of CI).
+  a Debian container. Runs in CI as the `same-machine` job.
 
 ### Changed
 
