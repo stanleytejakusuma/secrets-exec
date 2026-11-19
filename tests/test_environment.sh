@@ -77,6 +77,15 @@ if [ -f "$T/env.out" ] && grep -qx "DEMO_TOKEN=$SECRET" "$T/env.out" && grep -qx
   ok "proxy/CA/keylog/loader scrubbed, ordinary kept"
 else ko "scrub: $(grep -E '^(HTTPS_PROXY|CURL_CA_BUNDLE|SSLKEYLOGFILE|LD_PRELOAD|MY_ORDINARY|DEMO_TOKEN)=' "$T/env.out" 2>/dev/null | cut -d= -f1 | tr '\n' ' ')"; fi
 
+# 3b. other trust-store and curl settings (Python requests CA bundle, any CURL_* setting)
+rm -f "$T/env.out"
+REQUESTS_CA_BUNDLE=/tmp/attacker-ca.pem CURL_NETRC_FILE=/tmp/netrc CURL_SSL_BACKEND=x SSL_CERT_X=y \
+  "$VE" envdump >/dev/null 2>&1
+if [ -f "$T/env.out" ] && grep -qx "DEMO_TOKEN=$SECRET" "$T/env.out" \
+   && ! grep -qE '^(REQUESTS_CA_BUNDLE|CURL_NETRC_FILE|CURL_SSL_BACKEND|SSL_CERT_X)=' "$T/env.out"; then
+  ok "REQUESTS_CA_BUNDLE, CURL_* and SSL_CERT_* scrubbed"
+else ko "trust-store scrub: $(grep -E '^(REQUESTS_CA_BUNDLE|CURL_NETRC_FILE|CURL_SSL_BACKEND|SSL_CERT_X)=' "$T/env.out" 2>/dev/null | cut -d= -f1 | tr '\n' ' ')"; fi
+
 # 4. new files are private even under a permissive umask
 rm -f "$AUDIT"
 (umask 000; "$VE" not-a-consumer >/dev/null 2>&1)

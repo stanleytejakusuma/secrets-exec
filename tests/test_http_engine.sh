@@ -39,5 +39,17 @@ for want in 'connect-timeout = 10' 'max-time = 60' 'max-filesize = 10000000'; do
   if grep -qx "$want" "$T/curl-config" 2>/dev/null; then ok "curl limit: $want"; else ko "missing curl limit: $want"; fi
 done
 
+# Run directly (not through the broker), a caller's SHELLOPTS=xtrace must not trace the token.
+# (SHELLOPTS is readonly inside bash, so it is passed with env.)
+rm -f "$T/curl-config"
+out="$(env SHELLOPTS=xtrace "$T/engine.sh" "$T/fixture.conf" /repos/a 2>&1)"
+if [ -f "$T/curl-config" ] && ! grep -q fixture-token-value <<<"$out"; then ok "direct run ignores caller SHELLOPTS"; else ko "direct run traced the token"; fi
+
+# Every bash program shipped here starts with bash -p (no imported options or functions).
+for f in http-get-engine.sh examples/consumers.d/github-read examples/consumers.d/bitget-read \
+         examples/consumers.d/mexc-read; do
+  if [ "$(head -1 "$REPO/$f")" = '#!/bin/bash -p' ]; then ok "bash -p: $f"; else ko "missing bash -p: $f"; fi
+done
+
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

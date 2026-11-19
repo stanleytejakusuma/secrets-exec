@@ -7,7 +7,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 No changes yet.
 
-## [0.1.0] - Unreleased
+## [0.1.1] - 2026-11-19
+
+### Security
+
+- Wildcard key rows now pass every local check (interpreter refusal, caller-URL
+  refusal, bundle name) before the key host is asked for a key listing. Before, a
+  refused call could still trigger one remote listing.
+- The engine also removes `REQUESTS_CA_BUNDLE`, every `CURL_*` and every `SSL_CERT_*`
+  variable from the programs it starts, so a caller cannot swap in its own TLS
+  trust store or curl settings.
+- `http-get-engine.sh` and the example consumers start with `#!/bin/bash -p`, so they
+  ignore a caller's `SHELLOPTS` and exported functions when run directly.
+
+### Changed
+
+- Installer backup directories use UTC timestamps.
+
+## [0.1.0] - 2026-11-18
 
 ### Added
 

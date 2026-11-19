@@ -41,7 +41,8 @@ shared HTTP engine and HTTP configuration: changing any trusted code or policy c
 redirect a credential. Review diffs before the installation owner applies changes.
 
 Make installed configuration directories owner-only (mode `0700`), configuration
-files `0600`, and consumer executables owner-only (`0700`). Keep the owner's review
+files `0600`, and consumer executables `0755` inside those owner-only directories
+(as `scripts/install.sh` does). Keep the owner's review
 and installation step outside the agent's editable workspace. These modes exclude
 other users, **not an agent running as the owner**. If enforcement is required, use
 a separately controlled OS principal and restrict its interface; this project does

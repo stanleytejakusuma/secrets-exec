@@ -59,8 +59,8 @@ root. From this source directory, preview changes and then explicitly apply them
 The default is a **dry run**, including diffs for existing managed files. Apply
 installs `~/bin/secrets-exec` and the HTTP engine/consumer examples under
 `~/.config/secrets-exec/`, with private configuration directories. Replaced files
-are first backed up in `~/.config/secrets-exec/backup-<timestamp>/` (timestamps use
-Asia/Jakarta, UTC+7). Repeated applies leave identical files unchanged. Existing
+are first backed up in `~/.config/secrets-exec/backup-<timestamp>/` (UTC
+timestamps). Repeated applies leave identical files unchanged. Existing
 `consumers.conf` and `backend.conf` are **never overwritten**; absent ones are
 created from examples with mode 0600. Backups can contain private configuration:
 protect and prune them deliberately. The installer uses HOME as its destination;

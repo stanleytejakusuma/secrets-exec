@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -p
 # http-get-engine.sh — the reviewed logic behind every GET-only header-auth consumer.
 #
 #   http-get-engine.sh <config-file> <path>

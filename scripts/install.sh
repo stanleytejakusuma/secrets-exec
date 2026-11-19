@@ -76,7 +76,7 @@ file() {
       (( rc <= 1 )) || die 'cannot diff existing file'
     else
       if [[ -z "$backup" ]]; then
-        backup="$CONF/backup-$(TZ=Asia/Jakarta date +%Y%m%dT%H%M%S%N%z)"
+        backup="$CONF/backup-$(date -u +%Y%m%dT%H%M%S%NZ)"
         install -d -m 0700 -- "$backup"
       fi
       install -d -m 0700 -- "$backup/$(dirname "$relative")"

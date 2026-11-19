@@ -70,6 +70,7 @@ run --apply
 backups=("$C"/backup-*)
 [ "${#backups[@]}" -eq 1 ] && [ -d "${backups[0]}" ] || exit 1
 [ "$(stat -c %a "${backups[0]}")" = 700 ]
+[[ "${backups[0]##*/}" =~ ^backup-[0-9]{8}T[0-9]{6}[0-9]+Z$ ]] || { echo "FAIL backup name not UTC: ${backups[0]##*/}"; exit 1; }
 cmp -s "$T/original" "${backups[0]}/bin/secrets-exec"
 cmp -s "$T/source/bin/secrets-exec" "$T/home/bin/secrets-exec"
 ok 'changed file backed up before replacement'

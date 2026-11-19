@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -p
 # mexc-read — example read-only MEXC spot + futures REST client.
 #
 #   secrets-exec mexc-read accounts    spot balances (GET /api/v3/account), projected to asset/free/locked

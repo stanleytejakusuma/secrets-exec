@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -p
 # Thin dispatcher: installed under ~/.config/secrets-exec/consumers.d/.
 # Resolve trusted configuration relative to this file, not the caller's HOME.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -p
 # bitget-read — example read-only Bitget REST client.
 #
 #   secrets-exec bitget-read accounts    USDT-M futures accounts + spot assets (balances)

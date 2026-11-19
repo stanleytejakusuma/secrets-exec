@@ -41,6 +41,8 @@ demo|fixture-bundle|TOKEN_A|DEMO_TOKEN|$T/consumer|
 glob|fixture-bundle|TOKEN_*|DEMO_TOKEN|$T/consumer|
 badbundle|fix'ture|TOKEN_A|DEMO_TOKEN|$T/consumer|
 badkey|fixture-bundle|TOK;EN|DEMO_TOKEN|$T/consumer|
+globbadbundle|fix'ture;id|TOKEN_*|DEMO_TOKEN|$T/consumer|
+globinterp|fixture-bundle|TOKEN_*|DEMO_TOKEN|/usr/bin/python3|
 EOF
 good() { printf '%s\n' '# fixture backend' host=keyhost.example 'get=/opt/kv/get {bundle} {key} --reveal' \
   'list=/opt/kv/list {bundle}' > "$B"; }
@@ -89,6 +91,13 @@ good; run badbundle
 if [ "$rc" = 2 ] && nossh; then ok "quote in bundle refused before fetch"; else ko "badbundle: rc=$rc out=$out"; fi
 run badkey
 if [ "$rc" = 2 ] && nossh; then ok "metacharacter in key refused before fetch"; else ko "badkey: rc=$rc out=$out"; fi
+# Wildcard rows list key names remotely; every local check must run before that listing.
+run globbadbundle
+if [ "$rc" = 2 ] && nossh; then ok "wildcard row: bad bundle refused before key listing"; else ko "globbadbundle: rc=$rc ssh=$(cat "$T/ssh.log" 2>/dev/null)"; fi
+run globinterp
+if [ "$rc" = 2 ] && nossh; then ok "wildcard row: interpreter refused before key listing"; else ko "globinterp: rc=$rc ssh=$(cat "$T/ssh.log" 2>/dev/null)"; fi
+run glob https://attacker.example
+if [ "$rc" = 2 ] && nossh; then ok "wildcard row: caller URL refused before key listing"; else ko "glob URL: rc=$rc ssh=$(cat "$T/ssh.log" 2>/dev/null)"; fi
 
 # 4. the engine source names no host or remote path of its own
 if ! grep -qE '^(REMOTE|SCRIPTS)="[^"]' "$ENGINE_FILE"; then ok "no hardcoded backend in the engine"
