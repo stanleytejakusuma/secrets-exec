@@ -49,7 +49,7 @@ No. It was in the consumer's environment only.
 
 | Protected | Not protected |
 | --- | --- |
-| The token stays out of the agent's context, transcript and provider logs | An agent that runs the backend command itself (`sudo … secrets-exec-keyhost`, `ssh keyhost`) can print any **allowed** token: deny that command in its tool rules |
+| The token stays out of the agent's context, transcript and provider logs | An agent that runs the backend command itself (`sudo … secrets-exec-keyhost`, `ssh keyhost`) can print any **allowed** token: deny that command in its tool rules (a speed bump; see [AI-agent setup](docs/ai-agents.md)) |
 | The store can live where the agent's user can't read it | Anything running as the agent's OS user can read process memory and environments |
 | The agent can only run programs you registered, not "any command with the token" | A registered program that prints its token, or a buggy one |
 | Caller URLs, shells and interpreters are refused; destinations are fixed per program | Secrets the agent puts in arguments (arguments are logged) |

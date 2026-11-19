@@ -25,7 +25,7 @@ Use this when the agent runs as an ordinary account **with no other sudo rights*
 the agent's account can already run anything as root, a sudo rule adds no separation:
 create a separate account for the agent first.
 
-Run as root once. Replace `you` with the account your agent runs as, and
+Run as root once, in bash, from this repository's checkout. Replace `you` with the account your agent runs as, and
 `example-code` with your bundle names (comma-separated for several).
 
 ```sh
@@ -46,8 +46,10 @@ visudo -cf "$tmp" && install -m 0440 "$tmp" /etc/sudoers.d/secrets-exec
 rm -f "$tmp"
 ```
 
-`NOLOG_OUTPUT` keeps the token out of sudo's I/O log if output logging is enabled on
-your system. sudo matches the arguments as one space-joined string; the key host
+`NOLOG_OUTPUT` keeps the token out of sudo's I/O log when output logging is turned on
+with `log_output`. If your sudoers instead sets `log_stdout` or `log_ttyout` directly,
+also add `Defaults!/usr/local/bin/secrets-exec-keyhost !log_stdout, !log_ttyout` (and
+check it with `visudo -c`). sudo matches the arguments as one space-joined string; the key host
 refuses repeated options and option values containing spaces, so a crafted argument
 list cannot match this rule while selecting another store or allowlist.
 

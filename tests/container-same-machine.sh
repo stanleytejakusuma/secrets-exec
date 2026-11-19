@@ -55,12 +55,13 @@ echo "--- 4 agent cannot widen the allowlist via sudo"
 if sudo -n -u secrets-store /usr/local/bin/secrets-exec-keyhost --store /var/lib/secrets-store/store --allow other get other TOKEN; then exit 9; fi
 echo "--- 5 agent cannot run anything else as the store user"
 if sudo -n -u secrets-store /bin/cat /var/lib/secrets-store/store/other/TOKEN; then exit 9; fi
-echo "--- 6 extra arguments after the pinned prefix refused"
-if sudo -n -u secrets-store /usr/local/bin/secrets-exec-keyhost --store /var/lib/secrets-store/store --allow example-code get example-code GITHUB_TOKEN --allow other; then exit 9; fi
+echo "--- 6 extra arguments after the pinned prefix: sudo lets them through, the key host refuses"
+if out="$(sudo -n -u secrets-store /usr/local/bin/secrets-exec-keyhost --store /var/lib/secrets-store/store --allow example-code,shared get example-code GITHUB_TOKEN --allow other 2>&1)"; then echo "$out"; exit 9; fi
+echo "$out"; [ "$out" = "secrets-exec-keyhost: invalid request" ] || exit 9
 echo "--- 8 crafted arguments that match the sudo rule as a joined string are refused"
 KH="/usr/local/bin/secrets-exec-keyhost"; ST=/var/lib/secrets-store/store
 if out="$(sudo -n -u secrets-store $KH --store "$ST --allow example-code,shared get x" --store "$ST" --allow other get other TOKEN 2>&1)"; then echo "$out"; exit 9; fi
-echo "$out"; case "$out" in *other-value*) exit 9 ;; esac
+echo "$out"; [ "$out" = "secrets-exec-keyhost: option values must be nonempty, without whitespace" ] || exit 9
 echo "--- 7 audit"; cat ~/.config/secrets-exec/audit.log
 if grep -qE "fake-container-value|shared-value" ~/.config/secrets-exec/audit.log; then exit 9; fi; echo "value not in audit"
 '

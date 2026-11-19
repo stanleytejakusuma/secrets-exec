@@ -144,7 +144,7 @@ else ko "local env: rc=$rc env=$(tr '\n' ' ' < "$T/helper-env" 2>/dev/null)"; fi
 # A name starting with '-' never reaches a local helper (it could be read as an option).
 printf 'dash|-bundle|TOKEN_A|DEMO_TOKEN|%s|\n' "$T/consumer" >> "$CONF"
 local_backend; lrun dash
-if [ "$rc" = 2 ] && [ ! -e "$T/local.log" ] && [ ! -e "$T/ran" ]; then ok "local backend: leading-dash name refused"
+if [ "$rc" = 2 ] && [ ! -e "$T/local.log" ] && [ ! -e "$T/ran" ] && grep -q "starting with .-." <<<"$out"; then ok "local backend: leading-dash name refused with a reason"
 else ko "dash name: rc=$rc log=$(cat "$T/local.log" 2>/dev/null)"; fi
 
 bad_local() { # bad_local <label> <lines...>
